@@ -8,7 +8,7 @@ import type { Mood } from './mood.js'
 import { chatName, contactName, shortName, canonicalJid, thumbPath, previewPath, hasPreviewImage, mediaFile, mediaDir, jidUser, withMentions, typeLabel, pinTarget, type ConnState } from './wa.js'
 import { inHerdr, reportHerdr, doneHerdr, titleHerdr, tabNameHerdr, releaseHerdr, openChatHerdr, focusHerdr, focusNextChatHerdr, paneFocusedHerdr } from './herdr.js'
 import type { Backend } from './backend.js'
-import { waMarkup, clipTagged, esc, colorFor, setTheme, dim, faint, italic, padding, fmtTime, fmtDay, fmtWhen, fmtWhenAt, daysAgo, dayKey, truncate, strWidth, wrapTagged, alignRight, visibleWidth, fold, graphemes, wrapChars } from './format.js'
+import { waMarkup, clipTagged, esc, colorFor, setTheme, dim, faint, italic, padding, fmtTime, fmtDay, fmtWhen, fmtWhenAt, dayKey, truncate, strWidth, wrapTagged, alignRight, visibleWidth, fold, graphemes, wrapChars } from './format.js'
 import { decode, cached, decodeThumb, thumbCached, cellSize, halfBlocks, blockGrid, blockCell, detectImageMode, detectRgb, KittyImages, RgbPainter, type BlockGrid, type Decoded, type ImageMode, type RgbCell } from './image.js'
 import { logger, uiLog } from './log.js'
 import { linksIn, showLinks, URL_RE } from './links.js'
@@ -47,8 +47,8 @@ function pidAlive(pid: number): boolean {
   } catch { return true }
 }
 
-/** A segment of the tab bar: which tab it corresponds to and where its × is (or whether it's the +). */
-interface TabSegment { x0: number; x1: number; index: number; closeX0: number; closeX1: number }
+/** A tab on the bar under the input: which one it is and its columns. */
+interface TabSegment { x0: number; x1: number; index: number }
 
 const num = (x: unknown): number => x as number
 
@@ -68,9 +68,8 @@ const WORDMARK = [
   '╰─┴─╯ ╰─┴ ╶─╯ ╶─╯ ╰─╯ ├─╯',
   '                      ╵',
 ]
-/** Someone typing: dots coming one after another, a step every 400 ms, in three cells ("." ".." "..."), or in one. */
-const typingDots = () => '.'.repeat(1 + Math.floor(Date.now() / 400) % 3).padEnd(3)
-const typingDot = () => ['.', '‥', '…'][Math.floor(Date.now() / 400) % 3]!
+/** Someone typing, where a chat's state is (its tab, its row) or in the window title: two emoji taking turns every 500 ms. */
+const typingEmoji = () => (Math.floor(Date.now() / 500) % 2 ? '💭' : '💬')
 /**
  * The time of a message of mine, carrying its state in the separator: "14 06" waiting to leave, "14.06" sent (one
  * dot), "14:06" delivered or read (two). Which was read the "❮" after the time of the last one says (renderMessages).
@@ -86,8 +85,6 @@ const PAGE = 300
  */
 const CALLING_CODE = /^(?:1|7|2[07]|3[0-469]|4[013-9]|5[1-8]|6[0-6]|8[1246]|9[0-58])/
 const callingCode = (digits: string) => CALLING_CODE.exec(digits)?.[0] ?? digits.slice(0, 3)
-/** The chat list's widest, in columns: past it, on a wide screen, when a chat's last message was would stray from its name. */
-const LIST_COLS = 60
 /** Frames, 40 ms apart, of the flight of a message just sent from where it was written to its place (flyDraft). */
 const FLY_FRAMES = 5
 /** How long, in seconds, WhatsApp lets one of my messages be deleted for everyone: a little over two days, kept short of it. */
@@ -220,26 +217,26 @@ export class Ui {
   private floatOff = ''
   /** The correction floating right above the word it replaces. */
   private ghostBox!: blessed.Widgets.BoxElement
-  /**
-   * The two rows above the text being written (drawBorder): the other side's next message, still to come, a bubble
-   * with their name and how they are, and a blank row under it; with the chat list open or a search, a blank row and
-   * a faint rule over the line, with the search's count.
-   */
+  /** The faint rule over the plain line (the chat list's filter, a search), with the search's count (drawBorder). */
   private ruleTop!: blessed.Widgets.BoxElement
   private ruleChar = '─'
   /** What the rule says over a search's line: its count (drawInput). */
   private borderHeader: string | null = null
-  /** The columns of the other side's name, where a click opens the chat list. */
-  private borderName = { x0: 0, x1: 0 }
-  /** Where the line on from the other side's bubble starts, scrolled up, with how many are below: a click goes there. */
+  /**
+   * Where "↓", with how many messages are below, starts beside the band while they're scrolled up, and on which of the
+   * input's rows: a click there goes down to the latest.
+   */
   private borderBelow = Infinity
+  private belowRow = -1
+  /** How many messages below the view "↓" said last (0 for none): a scroll or a frame redraws the input only when it changes. */
+  private belowShown = 0
+  /** The rows at the bottom the layout was last set for (resizeInput). */
+  private laidBottom = 0
   /** The rows at the top of the input that say what's being replied to, reacted to or edited: one, or none. */
   private headerRows = 0
   /** The message just sent, flying from where it was written to where it lands among the messages (flyDraft). */
   private flyBox!: blessed.Widgets.BoxElement
   private flight: { timer: NodeJS.Timeout; text: string; frame: number; arrived: boolean; room: number } | undefined
-  /** Per group, how many of its followed members are online, said by its bubble over the input ("3 online"). */
-  private groupOnline = new Map<string, number>()
   private ghostTimer: NodeJS.Timeout | undefined
   /** The corrections found in my recent messages, by chat, id and text: null while being checked, or with none. */
   private sentFixes = new Map<string, Fix[] | null>()
@@ -268,6 +265,13 @@ export class Ui {
    */
   private pickerItems: string[] = []
   private pickerParts = new Map<number, [text: string, lit: boolean][]>()
+  /**
+   * Each first row's text and its time apart, so the selection's green covers the text and leaves the time out, as a
+   * bubble does (selectedRow); and the columns the time takes at the right end, a cell of gap before it: just the
+   * time, or the day too with a filter or messages found (pickerBubbleEnd).
+   */
+  private pickerHeads = new Map<number, [body: string, time: string]>()
+  private pickerTimeCols = 5
   private pickerLit: number[] = []
   /**
    * My jid as the last connection gave it, kept between runs: the chat list writes numbers by its country code
@@ -278,10 +282,18 @@ export class Ui {
   private profiles = new Map<string, ProfileRow>()
   /** Each chat's state, as the emoji the server worked out from its messages (mood.ts), shown after its name. */
   private moods = this.loadMoods()
+  /** The chats whose number is a WhatsApp Business account, marked 💼 after it (chatNumber). */
+  private business = this.loadBusiness()
   private profileAsked = new Set<string>()
   private pickerAvatars = new Map<number, { path: string; d: Decoded }>()
   /** The photos whose small copy is being decoded (loadVisibleProfiles). */
   private thumbWaiting = new Set<string>()
+  /**
+   * The chats' photos in their tabs, before the names, two cells by one, placed with Kitty (placeImages) or drawn in
+   * half-blocks (repainted in their exact colours by paintRgb): each one's chat, small copy's key, decoded image and
+   * column on the tab bar.
+   */
+  private tabPhotos: { jid: string; path: string; d: Decoded; x: number }[] = []
   /** The last press on the list, and whether it was on a chat's photo (see the list's 'select'). */
   private pickerPress: { at: number; photo: boolean } | undefined
   private pickerFound: { query: string; rows: MessageRow[] } | undefined
@@ -407,7 +419,7 @@ export class Ui {
   private transientTimer: NodeJS.Timeout | undefined
   private atBottom = true
   private renderTimer: NodeJS.Timeout | undefined
-  /** Chats where someone is typing, and the clock that moves their dots while there's any. */
+  /** Chats where someone is typing, and the clock that turns their emoji (typingEmoji) while there's any. */
   private typing = new Set<string>()
   /** One-to-one chats whose person is online right now, for the prompt's mark. */
   private online = new Set<string>()
@@ -442,10 +454,11 @@ export class Ui {
    * with the text up to half the screen.
    */
   private inputRows = 1
-  /** Lines occupied at the bottom: the two rows over the input (ruleTop) and the input's own. */
-  private get bottom(): number { return this.inputRows + 2 }
+  /** The input's plain line, for a search in a chat, under a rule (ruleTop); otherwise the band, the list's filter too. */
+  private get plainInput(): boolean { return !this.pickerOpen && (!!this.search || !this.current) }
+  /** Lines occupied at the bottom: the input's, the tab bar under it, and the rule over the plain line. */
+  private get bottom(): number { return this.inputRows + 1 + (this.plainInput ? 1 : 0) }
   /** Lines occupied at the top: the tab bar (1), which doesn't exist in single-chat mode. */
-  private get barRows(): number { return this.fixed ? 0 : 1 }
 
   constructor(private wa: Backend, caps: TermCaps, private wanted?: string) {
     this.mode = detectImageMode(caps.kittyGraphics, inHerdr)
@@ -500,48 +513,46 @@ export class Ui {
     this.disablePaste = enableBracketedPaste((this.screen.program as unknown as { input: Parameters<typeof enableBracketedPaste>[0] }).input, s => program._write(s))
     logger.info({ caps, images: this.mode, dark: this.dark, term: process.env.TERM }, 'terminal')
 
-    // Layout: the tab bar at the top with status on the right, messages at full width, and under them, as the next two
-    // messages, the other side's still to come (their name and how they are) and mine being written, on my bubbles'
-    // green, growing upwards with the text.
+    // Layout: messages at full width, and under them, as my next message, the text being written on my bubbles' green,
+    // growing upwards with it; under that, the tab bar, with the status on the right.
     this.tabsBar = blessed.box({
-      parent: this.screen, top: 0, left: 0, width: '100%', height: 1, tags: true, mouse: true,
+      parent: this.screen, top: '100%-1', left: 0, width: '100%', height: 1, tags: true, mouse: true,
     })
     this.msgBox = blessed.box({
-      parent: this.screen, top: this.barRows, left: 0, right: 0, height: `100%-${this.bottom + this.barRows}`, padding: { left: 1 },
+      parent: this.screen, top: 0, left: 0, right: 0, height: `100%-${this.bottom}`, padding: { left: 1 },
       // The lines arrive wrapped to the panel's width already (blessed only wraps from the left, and measures emoji
       // one unit too long); left to itself it would still cut a line that reaches the edge at its last word.
       tags: true, wrap: false, scrollable: true, alwaysScroll: true, mouse: true,
     }) as ClinesBox
     this.input = blessed.box({
-      parent: this.screen, top: `100%-${this.bottom - 2}`, left: 0, right: 0, height: this.inputRows,
+      parent: this.screen, top: `100%-${this.inputRows + 1}`, left: 0, right: 0, height: this.inputRows,
       // Each line is laid out to its width already, the bubble's to the end: blessed is left to wrap nothing.
       tags: true, mouse: true, wrap: false,
     })
     // Box-drawing only with a UTF-8 locale, like the frames; otherwise plain dashes.
     this.ruleChar = caps.utf8 ? '─' : '-'
     // No wrapping: the rule fills its width, and blessed would break it at a space.
-    this.ruleTop = blessed.box({ parent: this.screen, top: `100%-${this.bottom}`, left: 0, right: 0, height: 2, tags: true, wrap: false, mouse: true })
+    this.ruleTop = blessed.box({ parent: this.screen, top: `100%-${this.inputRows + 2}`, left: 0, right: 0, height: 1, tags: true, wrap: false })
     this.picker = blessed.list({
-      parent: this.screen, top: this.barRows, left: 0, right: 0, height: `100%-${this.bottom + this.barRows}`, padding: { left: 1 }, hidden: true,
+      parent: this.screen, top: 0, left: 0, right: 0, height: `100%-${this.bottom + 1}`, padding: { left: 1 }, hidden: true,
       // Its own colours kept on the selected row (blessed would force the selection's onto every cell, a photo's
       // half-blocks too, whose top halves then came out white): the selected row is given without them instead,
       // but for the photo's (selectedRow).
       tags: true, keys: true, mouse: true, invertSelected: false,
-      // The selected chat is marked as the active tab, bold and in the theme's strongest color, over a bubble's
-      // background across the whole row (repainted in WhatsApp Web's colour where the terminal takes 24-bit colour).
-      style: { selected: { bold: true, fg: this.dark ? 'bright-white' : 'black', bg: this.bubbleBg.theirs } } as unknown as blessed.Widgets.ListElementStyle,
+      // The selected chat is marked as the active tab is, bold and in the theme's strongest color, on my bubbles' green
+      // up to its time, which stays out as a message's does (selectedRow, litRow; repainted in WhatsApp Web's colour
+      // where the terminal takes 24-bit colour).
+      style: { selected: { bold: true, fg: this.dark ? 'bright-white' : 'black' } } as unknown as blessed.Widgets.ListElementStyle,
     })
     // Rows aren't wrapped, as the messages' aren't: a row is one line, cut at the edge should it ever run past it.
     // Set as each row is made, before blessed first lays out its content.
     const list = this.picker as unknown as { createItem: (content: string) => { wrap: boolean } }
     const createItem = list.createItem.bind(list)
     list.createItem = content => { const item = createItem(content); item.wrap = false; return item }
-    this.pickerHead = blessed.box({ parent: this.screen, top: this.barRows, left: 0, right: 0, height: 1, padding: { left: 1 }, tags: true, wrap: false, hidden: true })
+    this.pickerHead = blessed.box({ parent: this.screen, top: 0, left: 0, right: 0, height: 1, padding: { left: 1 }, tags: true, wrap: false, hidden: true })
     // Floating over the messages (status at the top right); created last so it stays on top.
     this.toast = blessed.box({ parent: this.screen, top: 0, left: 0, width: 1, height: 1, tags: true, hidden: true })
     this.flyBox = blessed.box({ parent: this.screen, top: 0, left: 0, width: 1, height: 1, tags: true, hidden: true, wrap: false })
-    // In single-chat mode the bar is gone and messages gain the line; status goes to the floating box, on the right.
-    if (this.fixed) this.tabsBar.hide()
     // Emoji suggestions, above the input and over the messages, with the highlight background to stand out.
     this.suggest = blessed.box({
       parent: this.screen, top: '100%-4', left: 0, width: 1, height: 1, tags: true, hidden: true, padding: { left: 1 }, wrap: false, mouse: true,
@@ -574,7 +585,7 @@ export class Ui {
     // blessed gives the keyboard to whatever is clicked; here it goes only where setFocus puts it. The chat list's
     // arrows work only while the list holds it, and a click on the popup that closes it, on the prompt or on the bar
     // took it away from the list for good.
-    for (const box of [this.tabsBar, this.ruleTop, this.msgBox, this.input, this.suggest, this.ghostBox, this.fixBox, this.viewerBox]) {
+    for (const box of [this.tabsBar, this.msgBox, this.input, this.suggest, this.ghostBox, this.fixBox, this.viewerBox]) {
       (box as unknown as { options: { autoFocus?: boolean } }).options.autoFocus = false
     }
 
@@ -630,7 +641,7 @@ export class Ui {
     this.bindDiagnostics()
     this.screen.on('keypress', (ch: string, key: blessed.Widgets.Events.IKeyEventArg) => this.onKey(ch, key))
     // The picker list has its position and height calculated by hand: it's recomputed when the terminal resizes.
-    this.screen.on('resize', () => { this.dirtyMessages = true; this.dirtyTabs = true; this.drawBorder(); if (this.pickerOpen) this.refreshPicker(); this.scheduleRender() })
+    this.screen.on('resize', () => { this.dirtyMessages = true; this.dirtyTabs = true; this.drawInput(); if (this.pickerOpen) this.refreshPicker(); this.scheduleRender() })
     // The painter looks at blessed's buffers just before it draws, when it's known which rows it will redraw.
     const screen = this.screen as unknown as { draw: (start: number, end: number) => void }
     const draw = screen.draw.bind(screen)
@@ -681,21 +692,17 @@ export class Ui {
       this.lightPickerRows(i)
     })
 
-    // A click on the other side's name, over the input, opens the chat list, as "/" does; on the line on from it,
-    // scrolled up, with how many messages are below, it goes down to the latest, as Ctrl+↓ does.
-    this.ruleTop.on('click', (data: { x: number; y: number }) => {
-      const x = data.x - num(this.ruleTop.aleft)
-      if (this.pickerOpen || data.y !== num(this.ruleTop.atop)) return
-      if (x >= this.borderName.x0 && x < this.borderName.x1) return this.openPicker()
-      if (x >= this.borderBelow && this.current) this.toLatest()
-    })
+    // A click on another tab goes to that chat; on the active one, the chat list opens, as "/" does; on a tab's photo,
+    // the photo opens large.
     this.tabsBar.on('click', (data: { x: number; y: number }) => {
       const x = data.x - num(this.tabsBar.aleft)
       const seg = this.segments.find(s => x >= s.x0 && x < s.x1)
       uiLog.info({ x, seg }, 'tab bar click')
       if (!seg) return
-      if (x >= seg.closeX0 && x < seg.closeX1) return this.closeTab(seg.index)
-      this.activateTab(seg.index)
+      const tp = this.tabPhotos.find(p => x >= p.x && x < p.x + 2)
+      if (tp) return this.openPhoto(tp.jid)
+      if (this.pickerOpen || seg.index !== (this.fixed ? 0 : this.active)) return this.fixed ? undefined : this.activateTab(seg.index)
+      this.openPicker()
     })
     // Clicking a message's "☺" opens its quick reactions, clicking an attachment opens it; outside messages a click
     // returns focus to the input. Selecting is for the keyboard. Dragging a message's name and time line to the right (press and release on
@@ -788,6 +795,9 @@ export class Ui {
     // Clicking the input places the cursor at the clicked position (or at the end of the line, if the click lands past the text).
     this.input.on('click', (data: { x: number; y: number }) => {
       if (this.textSelected()) return
+      // On "↓" beside the band, scrolled up, the messages go down to the latest, as Ctrl+↓ does.
+      const cx = data.x - num(this.input.aleft) - num(this.input.ileft), cy = data.y - num(this.input.atop) - num(this.input.itop)
+      if (!this.plainInput && cy === this.belowRow && cx >= this.borderBelow) return this.toLatest()
       if (!this.pickerOpen) this.setFocus('input')
       {
         const x = data.x - num(this.input.aleft) - num(this.input.ileft) - this.promptWidth
@@ -855,20 +865,18 @@ export class Ui {
     this.wa.on('profile', jid => {
       const p = store.getProfile(jid)
       if (p) this.profiles.set(jid, p)
+      if (store.getState<boolean>(`biz:${jid}`)) this.business.add(jid); else this.business.delete(jid)
       if (this.pickerOpen) { this.redrawPickerRows([jid]); this.scheduleRender() }
     })
     this.wa.on('mood', jid => {
       this.moods.set(jid, store.getState<Mood>(`mood:${jid}`)?.emoji ?? '')
+      this.dirtyTabs = true
       if (this.pickerOpen) this.redrawPickerRows([jid])
-      if (jid === this.current) this.drawBorder()
+      if (jid === this.current) this.drawInput()
       this.scheduleRender()
     })
     this.wa.on('typing', (jid, who) => this.onTyping(jid, who.length > 0))
     this.wa.on('available', on => { this.available = on })
-    this.wa.on('groupOnline', (jid, n) => {
-      this.groupOnline.set(jid, n)
-      if (jid === this.current) { this.drawInput(); this.screen.render() }
-    })
     this.wa.on('presence', (jid, on) => {
       if (on) this.online.add(jid); else this.online.delete(jid)
       if (this.pickerOpen) { this.redrawPickerRows([jid]); this.screen.render() }
@@ -949,7 +957,7 @@ export class Ui {
     // that clears it. Typing ends as if they'd stopped; online comes back once open, from the presence
     // subscriptions renewed below.
     for (const jid of [...this.typing]) this.onTyping(jid, false)
-    if (this.online.size || this.groupOnline.size) { this.online.clear(); this.groupOnline.clear(); this.drawInput() }
+    if (this.online.size) { this.online.clear(); this.drawInput() }
     if (state === 'qr' && this.wa.qr) {
       QRCode.toString(this.wa.qr, { type: 'terminal', small: true }, (err, qr) => {
         if (err) { logger.error({ err }, 'qr'); return }
@@ -965,7 +973,7 @@ export class Ui {
       this.connText = ''
       this.showingQr = false
       this.dirtyMessages = true
-      for (const jid of this.tabs) this.wa.subscribePresence(jid)
+      for (const jid of this.tabs) { this.wa.subscribePresence(jid); this.wa.ensureName(jid) }
       if (this.lastWrite && this.hasFocus !== false && Date.now() - this.lastWrite < 120000) { this.lastPresenceTouch = Date.now(); this.wa.touchPresence(process.pid) }
       if (this.hasFocus !== undefined) this.wa.setFocus(process.pid, this.hasFocus)
       this.scheduleRender()
@@ -979,9 +987,8 @@ export class Ui {
   }
 
   /**
-   * Someone started or stopped typing: dots come one after another in their tab, before the name (for the chat in view,
-   * after its name over the input, and in the list, after "a escrever"), and in the window title (in Herdr, the
-   * agent's name).
+   * Someone started or stopped typing: two emoji take turns where the chat's state's emoji is, in its tab and its row
+   * of the list, and before its name in the window title (in Herdr, the agent's name).
    */
   private onTyping(jid: string, active: boolean) {
     if (active) this.typing.add(jid); else this.typing.delete(jid)
@@ -993,14 +1000,13 @@ export class Ui {
     this.screen.render()
   }
 
-  /** The dots' clock, a look every 100 ms for their step every 400 (typingDots): it runs while anyone is typing. */
+  /** The typing emoji's clock, a look every 100 ms for their turn every 500: it runs while anyone is typing. */
   private syncTypingTimer() {
     const on = this.typing.size > 0
     if (on && !this.typingTimer) {
       this.typingTimer = setInterval(() => {
         this.drawTabs()
         this.redrawPickerRows(this.typing)
-        if (this.current && this.typing.has(this.current)) this.drawBorder()
         this.updateTitle()
         this.screen.render()
       }, 100)
@@ -1734,6 +1740,7 @@ export class Ui {
     this.dirtyTabs = true
     this.saveTabs()
     this.wa.subscribePresence(jid)
+    this.wa.ensureName(jid)
     if (this.pickerOpen) this.closePicker(false)
     this.setFocus('input')
     this.renderNow()
@@ -1780,8 +1787,8 @@ export class Ui {
     this.dirtyMessages = true
     this.lineMap = []; this.images = []; this.rows = []; this.selected = null
     this.saveTabs()
-    // Closing the last tab means quitting: there's no going back to the picker.
-    if (!this.tabs.length) return this.quit()
+    // Closing the last tab goes back to the chat list, where Esc, with no tab left, quits.
+    if (!this.tabs.length) return this.openPicker()
     // The prompt takes the name of the chat now in front.
     this.drawInput()
     this.renderNow()
@@ -1789,54 +1796,83 @@ export class Ui {
     if (jid) this.markReadIfSeen(jid)
   }
 
+  /**
+   * The tab bar, under the input: one tab per open chat (in single-chat mode, that one), its photo (tabPhotos), its
+   * name and its state's emoji (moodOf), or in its place two emoji taking turns while someone types there, and the
+   * unread count in red. The active one on my bubbles' green, as the band it's the label of, its name in its colour,
+   * bold; the others on the other side's grey, quieter. No × to close: Esc closes the active one. With the chat list
+   * open, its own tab comes first and is the active one, "conversas" (or "procurar", searching them all). Names
+   * shorten for the tabs to fit, down to 6 characters. Against the right edge, a passing message or the connection's
+   * state when it needs attention.
+   */
   private drawTabs() {
     const width = num(this.tabsBar.width)
-    const maxName = width
-    // In single-chat mode there's no tab to show: the line is left with just the status on the right.
-    const tabs = this.fixed ? [] : this.tabs.map((jid, i) => {
-      const unread = store.getChat(jid)?.unread ?? 0
-      return { jid, i, name: chatName(jid), badge: unread > 0 ? `(${unread})` : '' }
+    const list = this.fixed ? (this.current ? [this.current] : []) : this.tabs
+    const activeAt = this.pickerOpen ? -1 : this.fixed ? 0 : this.active
+    // While someone types there, the two emoji taking turns (typingEmoji) stand where the state's is.
+    const tabs = list.map((jid, i) => {
+      const chat = store.getChat(jid)
+      const mood = this.typing.has(jid) ? ` ${typingEmoji()}` : this.moodOf(jid, chat?.last_ts)
+      return { jid, i, name: chatName(jid), mood, badge: chat?.unread ? `(${chat.unread})` : '' }
     })
-    // Shorten the names so they all fit, down to a minimum of 6 characters; beyond that the bar truncates on the right.
-    const close = this.fixed ? '' : ' ×'
-    const overhead = (t: { badge: string }) => 1 + (t.badge ? strWidth(t.badge) + 1 : 0) + strWidth(close) + 1
+    // With the chat list open, its own tab comes first, active: the band is its filter's.
+    const own = this.pickerOpen ? t(this.pickerSearch ? 'search' : 'chatsTab') : ''
+    const ownW = own ? strWidth(own) + 3 : 0
+    // Each tab: a cell either side of its text, and a cell between tabs; the first starts where the band does.
+    // Each one's photo, before its name, once it has one (its cells kept while it's decoded, so nothing moves).
+    const photoOf = (jid: string) => {
+      const avatar = this.mode === 'none' ? undefined : (this.profiles.get(jid) ?? store.getProfile(jid))?.avatar
+      return avatar ? path.join(mediaDir(jid), avatar) : null
+    }
+    const photos = new Map(tabs.map(t => [t.i, photoOf(t.jid)]))
+    this.tabPhotos = []
+    const overhead = (t: (typeof tabs)[number]) => 2 + strWidth(t.mood) + (t.badge ? strWidth(t.badge) + 1 : 0) + 1 + (photos.get(t.i) ? 3 : 0)
     let nameW = Math.max(...tabs.map(t => strWidth(t.name)), 0)
-    const fits = (w: number) => tabs.reduce((sum, t) => sum + Math.min(strWidth(t.name), w) + overhead(t), 0) <= maxName
+    const fits = (w: number) => 1 + ownW + tabs.reduce((sum, t) => sum + Math.min(strWidth(t.name), w) + overhead(t), 0) <= width
     while (nameW > 6 && !fits(nameW)) nameW--
-    // The active tab stands out only through its text: bold and in the theme's strongest color; the others stay in the normal color.
-    const strong = this.dark ? 'bright-white' : 'black'
     let out = '', x = 0
     this.segments = []
+    if (own) {
+      const bg = this.bubbleBg.mine
+      const strong = this.dark ? 'bright-white' : 'black'
+      out += ` {${bg}-bg} {${strong}-fg}{bold}${esc(own)}{/bold}{/${strong}-fg} {/${bg}-bg}`
+      this.segments.push({ x0: 1, x1: ownW, index: -1 })
+      x = ownW
+    }
     for (const t of tabs) {
       const name = truncate(t.name, nameW)
-      const shown = t.i === this.active && !this.pickerOpen
-      // While they type, dots in the space before the name (typingDot), so the tab keeps its width; not on the chat in
-      // view, where they come by the name over the input.
-      const label = `${this.typing.has(t.jid) && !shown ? typingDot() : ' '}${esc(name)}`
-      const text = ` ${name}${t.badge ? ' ' + t.badge : ''}${close} `
-      const w = strWidth(text)
-      const closeX0 = close ? x + w - 2 : x + w
-      this.segments.push({ x0: x, x1: x + w, index: t.i, closeX0, closeX1: close ? closeX0 + 1 : closeX0 })
+      const active = t.i === activeAt
+      const bg = active ? this.bubbleBg.mine : this.bubbleBg.theirs
+      const color = active ? colorFor(t.jid) : FG.tab
+      const lead = ` {${bg}-bg} `
       const badge = t.badge ? ` {${FG.badge}-fg}{bold}${t.badge}{/bold}{/${FG.badge}-fg}` : ''
-      const closeMark = close ? ` ${dim('×')}` : ''
-      out += shown
-        ? `{${strong}-fg}{bold}${label}{/bold}{/${strong}-fg}${badge}${closeMark} `
-        : `{${FG.tab}-fg}${label}{/${FG.tab}-fg}${badge}${closeMark} `
-      x += w
+      const label = active ? `{bold}${esc(name)}{/bold}` : esc(name)
+      // The photo, two cells and one of gap after the tab's spare cell: blank where Kitty places it, half-blocks
+      // otherwise (their full reset at the end, the tab's background opened again after it).
+      let photo = ''
+      const photoFile = photos.get(t.i)
+      if (photoFile) {
+        const d = thumbCached(photoFile)
+        if (d && !(d instanceof Error)) {
+          this.tabPhotos.push({ jid: t.jid, path: `${photoFile}#small`, d, x: x + 2 })
+          photo = `${this.kitty ? '  ' : halfBlocks(d, 2, 1)[0]!}\x1b[48;5;${bg}m `
+        } else {
+          photo = '   '
+          if (!d && !this.thumbWaiting.has(photoFile)) {
+            this.thumbWaiting.add(photoFile)
+            decodeThumb(photoFile).then(() => { this.thumbWaiting.delete(photoFile); this.dirtyTabs = true; this.scheduleRender() })
+          }
+        }
+      }
+      const w = 2 + (photo ? 3 : 0) + strWidth(name) + strWidth(t.mood) + (t.badge ? strWidth(t.badge) + 1 : 0)
+      this.segments.push({ x0: x + 1, x1: x + 1 + w, index: t.i })
+      out += `${lead}${photo}{${color}-fg}${label}{/${color}-fg}${t.mood}${badge} {/${bg}-bg}`
+      x += 1 + w
     }
     // Status flush right: the transient message (yellow) or the connection; truncated if it doesn't fit.
     // Connected isn't announced: only transient notices and states that need attention (QR, connection dropped).
     const avail = width - x - 2
-    let text = this.transient ? dim(esc(truncate(this.transient, avail))) : this.connText
-    if (this.fixed) {
-      if (!text) return this.toast.hide()
-      const w = Math.min(width, visibleWidth(text) + 2)
-      // Status sticks to the top right, where the tab bar would carry it.
-      this.toast.left = width - w; this.toast.width = w
-      this.toast.top = 0
-      this.toast.setContent(` ${text} `)
-      return this.toast.show()
-    }
+    const text = this.transient ? dim(esc(truncate(this.transient, Math.max(1, avail)))) : this.connText
     if (avail >= 6 && text) out += ' '.repeat(Math.max(1, width - x - visibleWidth(text) - 1)) + text
     this.tabsBar.setContent(out)
     this.drawNotice(width)
@@ -1855,6 +1891,7 @@ export class Ui {
     const w = strWidth(text) + 2
     const seg = this.segments.find(s => this.tabs[s.index] === n.jid)
     const left = Math.max(0, Math.min(seg && seg.x0 < width ? seg.x0 : width, width - w))
+    this.toast.top = '100%-1'
     this.toast.left = left
     this.toast.width = Math.min(w, width)
     const c = nearest256(mix(this.bgRgb, this.fgRgb, 0.85 * this.noticeOpacity(n.since)))
@@ -1953,12 +1990,13 @@ export class Ui {
    * A message found, as rows of the list: its chat's name in its colour, who wrote it and, at the right edge, when;
    * then up to two lines of its text, indented, from a little before the first match, the matches in reverse video.
    */
-  private pickerHitRows(m: MessageRow, c: ChatRow, width: number): [string, [string, boolean][][]] {
+  private pickerHitRows(m: MessageRow, c: ChatRow, width: number, slot: number): [string, [string, boolean][][]] {
     const color = colorFor(c.jid)
     const who = m.from_me ? t('me') : c.is_group ? contactName(m.sender_jid) : ''
     const right = faint(esc(fmtWhen(m.ts)))
-    const head = `{${color}-fg}${esc(truncate(chatName(c.jid), Math.max(8, width - visibleWidth(right) - 4)))}{/${color}-fg}${who ? dim(` · ${esc(truncate(who, 24))}`) : ''}`
-    const indent = '    ', room = Math.max(8, width - indent.length - 1)
+    const end = this.pickerBubbleEnd(width)
+    const head = `{${color}-fg}${esc(truncate(chatName(c.jid), Math.max(8, end - 4)))}{/${color}-fg}${who ? dim(` · ${esc(truncate(who, 24))}`) : ''}`
+    const indent = '    ', room = Math.max(8, end - indent.length)
     let text = showLinks(withMentions(m.text)).replace(/\s+/g, ' ')
     // The first match stays in view: past a third of the first line, the text starts a little before it, after "…".
     const first = Math.min(...matchedChars(text, this.pickerWords))
@@ -1971,7 +2009,10 @@ export class Ui {
       ;[...line].forEach((ch, i) => { if (at.has(i) !== on) { out += on ? '{/inverse}' : '{inverse}'; on = !on }; out += esc(ch) })
       return on ? `${out}{/inverse}` : out
     }
-    return [`${head}${' '.repeat(Math.max(1, padding(`${head}${right}`, width)))}${right}`, lines.slice(0, 2).map(l => [[indent, true], [marked(l), true]] as [string, boolean][])]
+    const body = `${head}${' '.repeat(Math.max(1, end - visibleWidth(head)))}`
+    const time = `${' '.repeat(Math.max(1, width - end - visibleWidth(right)))}${right}`
+    this.pickerHeads.set(slot, [body, time])
+    return [`${body}${time}`, lines.slice(0, 2).map(l => [[indent, true], [marked(l), true]] as [string, boolean][])]
   }
 
   /** Opens the chat the way the list does: in this pane or tab ('here'), or, in Herdr, in a new pane or tab. */
@@ -2003,7 +2044,6 @@ export class Ui {
     // it's being looked at: at the bottom if it was there, otherwise with its first chat in view on the same row,
     // rather than scrolled back to the selection, which the wheel may have left out of view.
     const list = this.picker as unknown as { childBase: number; childOffset: number }
-    this.picker.width = this.pickerHead.width = Math.min(num(this.screen.width), LIST_COLS)
     const keepView = sameFilter && this.pickerFocus === undefined && this.pickerSlots.length > 0
     const atEnd = list.childBase + num(this.picker.height) - num(this.picker.iheight) >= this.pickerSlots.length
     let anchor: { jid: string; row: number } | undefined
@@ -2034,24 +2074,28 @@ export class Ui {
     this.filtered = words.length ? [0, 1, 2].flatMap(r => matches.filter(c => rank(c) === r)) : this.chats
     this.pickerWords = words
     const width = num(this.picker.width) - num(this.picker.iwidth) - 1
-    // Without a filter the chats go under day separators, like the messages: older, this week, yesterday, today, the
-    // most recent at the bottom. A filter orders them by how well they match, which no separator would follow.
-    const bucket = (ts: number) => { const d = daysAgo(ts); return d <= 0 ? t('today') : d === 1 ? t('yesterday') : d < 7 ? t('thisWeek') : t('older') }
+    // Without a filter the chats go under a separator for each day, as the messages do ("hoje", "ontem", "12 set"),
+    // the most recent at the bottom, each with just its time. A filter orders them by how well they match, which no
+    // separator would follow.
+    const bucket = (ts: number) => fmtDay(ts)
     const slots: (ChatRow | null)[] = [], items: string[] = []
     // Searching messages (Ctrl+F), from two characters on, the list holds only the messages found in every chat, the
     // most recent at the bottom, each on its first row (selectable) and the rows of text after it (skipped over).
     this.pickerHits.clear()
     this.pickerCont.clear()
     this.pickerParts.clear()
+    this.pickerHeads.clear()
     this.pickerAvatars.clear()
     this.pickerLit = []
     this.profiles = new Map(store.listProfiles().map(p => [p.jid, p]))
     this.moods = this.loadMoods()
+    this.business = this.loadBusiness()
     const hits = this.pickerSearch && this.filter.trim().length >= 2 ? this.searchAll(this.filter) : []
+    this.pickerTimeCols = words.length || hits.length ? 12 : 5
     for (const m of hits) {
       const chat = store.getChat(m.chat_jid)
       if (!chat) continue
-      const start = slots.length, rows = this.pickerHitRows(m, chat, width)
+      const start = slots.length, rows = this.pickerHitRows(m, chat, width, start)
       this.pickerHits.set(start, m)
       slots.push(chat); items.push(rows[0])
       for (const part of rows[1]) { this.pickerCont.set(slots.length, start); this.pickerParts.set(slots.length, part); slots.push(null); items.push(part.map(([text]) => text).join('')) }
@@ -2090,13 +2134,13 @@ export class Ui {
     // Never shorter than one line: blessed skips an element of zero height altogether, leaving what was drawn there
     // and the list's scroll state stale until the next refresh. The app's name heads it always, however small the
     // terminal: big (WORDMARK) with a UTF-8 locale, on one line otherwise; the list takes what's left under it.
-    const panel = num(this.screen.height) - this.bottom - this.barRows
+    const panel = num(this.screen.height) - this.bottom - 1
     const rows = Math.max(1, items.length)
     const big = this.ruleChar === '─'
     const head = big ? WORDMARK.length : 1
     const room = Math.max(1, panel - head)
     const gap = Math.max(0, room - rows)
-    this.picker.top = this.barRows + head + gap
+    this.picker.top = head + gap
     this.picker.height = Math.max(1, room - gap)
     this.drawPickerHead(big)
     const want = this.pickerFocus !== undefined ? this.pickerFocus : sameFilter ? selectedJid : null
@@ -2127,11 +2171,11 @@ export class Ui {
   /**
    * A chat's two rows in the list, the photo (avatarCells) in the first four cells of both. On the first, its name in
    * the colour it has as a sender in groups (bold with unread messages, the filter's words underlined), its state's
-   * emoji (moodOf), 👀 while the person is online, "·" when it has a tab, and at the right edge when the last message
-   * was (fmtWhenAt). On the
-   * second, under the name, the unread count, in WhatsApp's green, or without unread messages the person's number or
-   * the group's size (chatNumber), and "a escrever" with dots coming one after another while someone types there. The
-   * second row comes in its parts (see pickerParts).
+   * emoji (moodOf), or in its place, while someone types there, the two emoji taking turns (typingEmoji), the unread
+   * count in red, as the tabs have them, 👀 while the person is online, "·" when it has a tab, and at the right edge
+   * the time of the last message, its day being its separator's (with a filter, the day too, fmtWhenAt). On the
+   * second, under the name, the person's number or the group's size (chatNumber). The second row comes in its parts
+   * (see pickerParts).
    */
   private pickerRows(c: ChatRow, width: number, slot: number): [string, [string, boolean][]] {
     const [top, bottom] = this.avatarCells(c, slot)
@@ -2139,17 +2183,23 @@ export class Ui {
     const eyes = !c.is_group && this.online.has(c.jid) && this.ruleChar === '─' ? ' 👀' : ''
     const open = this.tabs.includes(c.jid) ? ' ·' : ''
     const ts = this.pickerLast.get(c.jid)?.ts ?? c.last_ts
-    const when = ts ? faint(esc(fmtWhenAt(ts))) : ''
-    const mood = this.moodOf(c.jid, c.last_ts)
-    const name = truncate(chatName(c.jid), Math.max(4, width - 4 - 1 - visibleWidth(when) - 1 - strWidth(mood) - strWidth(eyes) - strWidth(open)))
+    // Just the time under its day's separator, as in a chat; with a filter, which has no separators, the day too.
+    const when = !ts ? '' : faint(esc(!this.pickerWords.length && dayKey(ts) === dayKey(c.last_ts) ? fmtTime(ts) : fmtWhenAt(ts)))
+    const mood = this.typing.has(c.jid) ? ` ${typingEmoji()}` : this.moodOf(c.jid, c.last_ts)
+    const badge = c.unread > 0 ? ` (${c.unread})` : ''
+    // The time flush right, in the column my messages' times end in, outside the selection's green, a cell of gap
+    // before it, as a message's is.
+    const end = this.pickerBubbleEnd(width)
+    const name = truncate(chatName(c.jid), Math.max(4, end - 4 - 1 - 1 - strWidth(mood) - strWidth(badge) - strWidth(eyes) - strWidth(open)))
     const named = `{${color}-fg}${this.underlineMatches(name)}{/${color}-fg}`
-    const left = `${top} ${c.unread > 0 ? `{bold}${named}{/bold}` : named}${mood}${eyes}${dim(open)}`
-    const first = `${left}${' '.repeat(Math.max(1, width - visibleWidth(left) - visibleWidth(when)))}${when}`
-    const count = c.unread > 0 ? t('unreadCount', c.unread) : ''
-    const unread = count ? `{${this.green}-fg}{bold}${esc(count)}{/bold}{/${this.green}-fg}` : ''
-    const typing = this.typing.has(c.jid) ? `{${this.green}-fg}${esc(t('typingWord'))}${typingDots()}{/${this.green}-fg}` : ''
+    const unread = badge ? `{${FG.badge}-fg}{bold}${badge}{/bold}{/${FG.badge}-fg}` : ''
+    const left = `${top} ${c.unread > 0 ? `{bold}${named}{/bold}` : named}${mood}${unread}${eyes}${dim(open)}`
+    const body = `${left}${' '.repeat(Math.max(1, end - visibleWidth(left)))}`
+    const time = `${' '.repeat(Math.max(1, width - end - visibleWidth(when)))}${when}`
+    this.pickerHeads.set(slot, [body, time])
+    const first = `${body}${time}`
     const number = this.chatNumber(c)
-    return [first, [[bottom, false], [` ${[unread || (number && dim(esc(number))), typing].filter(Boolean).join('  ')}`, true]]]
+    return [first, [[bottom, false], [` ${number ? dim(esc(number)) : ''}`, true]]]
   }
 
   /**
@@ -2173,6 +2223,11 @@ export class Ui {
     return [`{${color}-bg}{bold} ${esc(initials)} {/bold}{/${color}-bg}`, `{${color}-bg}    {/${color}-bg}`]
   }
 
+  /** The chats whose number the server found to be a WhatsApp Business account. */
+  private loadBusiness(): Set<string> {
+    return new Set(store.listState<boolean>('biz:').filter(r => r.value).map(r => r.key.slice('biz:'.length)))
+  }
+
   /** The chats' states the server keeps (mood.ts), by chat. */
   private loadMoods(): Map<string, string> {
     return new Map(store.listState<Mood>('mood:').map(r => [r.key.slice('mood:'.length), r.value.emoji]))
@@ -2186,8 +2241,8 @@ export class Ui {
 
   /**
    * What the list says of a chat under its name: for a person, their number (by the number a lid stands for when
-   * known; nothing with only a lid), without the country code when it's the same as mine; for a group, how many
-   * members it has.
+   * known; nothing with only a lid), without the country code when it's the same as mine, and 💼 after it when it's a
+   * WhatsApp Business account; for a group, how many members it has.
    */
   private chatNumber(c: ChatRow): string {
     if (c.is_group) { const p = this.profiles.get(c.jid); return p?.members != null ? t('groupMembers', p.members) : t('groupOnly') }
@@ -2196,8 +2251,8 @@ export class Ui {
     if (!digits) return ''
     const code = callingCode(digits), national = digits.slice(code.length)
     const pt = code === '351' && national.length === 9 ? `${national.slice(0, 3)} ${national.slice(3, 6)} ${national.slice(6)}` : ''
-    if (code === callingCode(jidUser(this.myJid))) return pt || national
-    return pt ? `+351 ${pt}` : `+${digits}`
+    const number = code === callingCode(jidUser(this.myJid)) ? pt || national : pt ? `+351 ${pt}` : `+${digits}`
+    return this.business.has(c.jid) ? `${number} 💼` : number
   }
 
   /** Whether a column of the list's rows (from the list's text start) is on a chat's photo: its first four. */
@@ -2211,8 +2266,8 @@ export class Ui {
    */
   private litRow(i: number): string {
     const parts = this.pickerParts.get(i) ?? [[this.pickerItems[i] ?? '', true]]
-    const width = num(this.picker.width) - num(this.picker.iwidth)
-    const bg = this.bubbleBg.theirs
+    const width = this.pickerBubbleEnd(num(this.picker.width) - num(this.picker.iwidth) - 1)
+    const bg = this.bubbleBg.mine
     const on = (s: string) => `{${bg}-bg}${s}{/${bg}-bg}`
     const pad = ' '.repeat(padding(parts.map(([text]) => text).join(''), width))
     return parts.map(([text, lit]) => (lit ? on(text) : text)).join('') + (pad ? on(pad) : '')
@@ -2223,7 +2278,20 @@ export class Ui {
    * so the selection's, the theme's strongest, takes them; a photo's colours, written as SGR, stay.
    */
   private selectedRow(i: number): string {
-    return (this.pickerItems[i] ?? '').replace(/\{\/?\d+-fg\}/g, '')
+    const strip = (s: string) => s.replace(/\{\/?\d+-fg\}/g, '')
+    const head = this.pickerHeads.get(i)
+    if (!head) return strip(this.pickerItems[i] ?? '')
+    // The green opened again after the photo's half-blocks, which end in a full reset, and closed before the time.
+    const on = `\x1b[48;5;${this.bubbleBg.mine}m`
+    return `${on}${strip(head[0]).replace(/\x1b\[0m/g, `\x1b[0m${on}`)}\x1b[49m${head[1]}`
+  }
+
+  /**
+   * Where the selection's green ends in a row laid out to `width`, short of the time's columns and a cell of gap; the
+   * time ends a column short of the list's edge, in the column my messages' times end in, their mark's cell after.
+   */
+  private pickerBubbleEnd(width: number): number {
+    return width - this.pickerTimeCols - 1
   }
 
   /** The rows that continue the one selected get its background; those that had it go back to their own look. */
@@ -2263,7 +2331,8 @@ export class Ui {
       // client busy while the list was open. The redraw is a scheduled one, not a frame drawn on the spot.
       if (file && !thumbCached(file) && !this.thumbWaiting.has(file)) {
         this.thumbWaiting.add(file)
-        decodeThumb(file).then(() => { this.thumbWaiting.delete(file); if (this.pickerOpen) { this.redrawPickerRows([c.jid]); this.scheduleRender() } })
+        // The tabs too: a tab waiting for the same photo didn't ask for it again.
+        decodeThumb(file).then(() => { this.thumbWaiting.delete(file); this.dirtyTabs = true; if (this.pickerOpen) this.redrawPickerRows([c.jid]); this.scheduleRender() })
       }
     }
   }
@@ -2300,9 +2369,9 @@ export class Ui {
     const plain = [t('chatsCount', this.chats.length), ...(unread ? [t('unreadCount', unread)] : [])].join(' · ')
     const counts = dim(esc(plain))
     const green = (s: string) => `{${this.green}-fg}${esc(s)}{/${this.green}-fg}`
-    this.pickerHead.top = this.barRows
+    this.pickerHead.top = 0
     if (big) {
-      // The counts end where the rows' times end, a column short of the edge (see refreshPicker's width).
+      // The counts end where the rows' times end, a column short of the edge.
       const w = num(this.pickerHead.width) - num(this.pickerHead.iwidth) - 1
       const after = (row: number) => w - strWidth(WORDMARK[row]!) - strWidth(plain)
       const row = after(1) >= 2 ? 1 : 2
@@ -2367,16 +2436,16 @@ export class Ui {
     this.screen.render()
   }
 
-  // Window title: the active chat, with dots coming in front while someone types (typingDot), or else a dot while there
-  // are unread messages in any chat. In Herdr, where the title is the agent's name, the name alone: the agent's status
-  // says the rest.
+  // Window title: the active chat, with two emoji taking turns in front while someone types (typingEmoji), or else a
+  // dot while there are unread messages in any chat. In Herdr, where the title is the agent's name, the name alone:
+  // the agent's status says the rest.
   private titleShown = ''
   /** How many unread messages the title last counted, so a new one is told apart (doneHerdr). */
   private unreadShown = 0
   private updateTitle() {
     const unread = store.listChats().filter(c => c.unread > 0 && (this.fixed ? c.jid === this.current : !c.archived))
     const typing = [...this.typing].filter(jid => !this.fixed || jid === this.current).map(jid => chatName(jid))
-    const mark = inHerdr ? '' : typing.length ? `${typingDot()} ` : unread.length ? '● ' : ''
+    const mark = inHerdr ? '' : typing.length ? `${typingEmoji()} ` : unread.length ? '● ' : ''
     const title = `${mark}${this.current ? chatName(this.current) : 'wassup'}`
     if (title !== this.titleShown) { this.titleShown = title; this.screen.title = title; titleHerdr(title) }
     // In Herdr, alone in its tab, the tab takes the chat's first name, with no state.
@@ -2423,7 +2492,10 @@ export class Ui {
   private updateAtBottom() {
     const total = this.msgBox._clines?.length ?? 0
     const at = this.msgBox.childBase + this.innerHeight() >= total
-    if (at !== this.atBottom || !at) { this.atBottom = at; this.drawBorder() }
+    const was = this.atBottom
+    this.atBottom = at
+    // "↓" beside the band follows: it comes and goes, and says how many are below.
+    if (!this.plainInput && (at !== was || this.belowCount() !== this.belowShown)) this.drawInput()
   }
 
   // ---------- drawing ----------
@@ -2767,20 +2839,23 @@ export class Ui {
   }
 
   private drawInput() {
-    // In a chat the text is written as my next message: on my bubbles' green, a band as wide as my bubbles can be,
-    // so it wraps where the message will, one line at minimum, growing upwards with the text, wrapped by word (never
-    // mid-word); what's being replied to, reacted to or edited on a row of its own at the band's top. Who it goes to
-    // is right above it (drawBorder). When the text has more lines than fit, the ones around the cursor are shown,
-    // with the cursor on the bottom one whenever possible. With the chat list open, or searching (Ctrl+F), the line
-    // is the filter's or the search's, plain, after "wassup ❯" or "procurar ❯".
+    // In a chat the text is written as my next message, on my bubbles' green, in a band as wide as my bubbles can be,
+    // two rows at least, growing upwards with the text, wrapped by word (never mid-word), the chat's tab, with its
+    // name, right under it (drawTabs); what's being replied to, reacted to or edited on a row of its own at its top.
+    // The chat list's filter is written in the same band, its tab "conversas" (or "procurar", searching them all).
+    // When the text has more lines than fit, the ones around the cursor are shown, with the cursor on the bottom one
+    // whenever possible. While the messages are scrolled up, "↓" and how many are below, beside the band where the
+    // time goes. Searching the chat (Ctrl+F), the line is the search's, plain, after "procurar ❯", under a faint rule
+    // (drawBorder).
     const W = num(this.input.width)
     // Searching the chat (Ctrl+F), the line is the search's, the rule above saying how it goes.
     const searching = !!this.search && !this.pickerOpen
-    const plain = this.pickerOpen || searching || !this.current
-    const who = this.pickerOpen ? (this.pickerSearch ? t('search') : APP) : searching ? t('search') : ''
-    const pw = this.promptWidth = plain ? 1 + (who ? strWidth(who) + 1 : 0) + 2 : 2
+    const plain = this.plainInput
+    const who = searching ? t('search') : ''
     // My bubbles' widest: they stop short of the time and its mark, with a cell of gap (see renderMessages).
     const stampW = visibleWidth(myTime(Date.now() / 1000, 0)) + 1
+    const bandW = W - 4 - stampW
+    const pw = this.promptWidth = plain ? 1 + (who ? strWidth(who) + 1 : 0) + 2 : 2
     const target = this.pickerOpen || searching ? null : this.replyTo ?? this.reactTo ?? this.editing
     const found = searching && this.search!.query ? (this.search!.hits.length ? t('searchHeader', this.search!.at + 1, this.search!.hits.length) : t('searchNone')) : null
     const header = searching ? (found ? `${t('search')} · ${found}` : t('search'))
@@ -2794,8 +2869,8 @@ export class Ui {
     // (which sits on the first one); a correction, whether of the mid-typed word or of a wrong word further back,
     // floating on the line above the word, starting on its column. Tab accepts. Every wrong passage the model found
     // is underlined in yellow while it applies; what floats is the cursor's one (ghostShown).
-    const view = searching ? null : this.ghostShown()
-    const width = Math.max(4, plain ? W - pw - 1 : W - 4 - stampW)
+    const view = searching || this.pickerOpen ? null : this.ghostShown()
+    const width = Math.max(4, plain ? W - pw - 1 : bandW)
     const chars = graphemes(this.pickerOpen ? this.filter : searching ? this.search!.query : this.inputValue)
     const cursor = Math.min(this.pickerOpen ? this.filterCursor : searching ? this.search!.cursor : this.cursor, chars.length)
     const lines = wrapChars(chars, width)
@@ -2833,10 +2908,10 @@ export class Ui {
       }
     }
     // The band takes two rows at least, and grows with the text, up to half the screen, a row more for the header at
-    // its top; the plain line, one.
+    // its top; the plain line, one, a row more for the rule over it.
     this.headerRows = header && !plain ? 1 : 0
     const rows = Math.max(plain ? 1 : 2 + this.headerRows, Math.min(lines.length + this.headerRows, Math.floor(num(this.screen.height) / 2)))
-    if (rows !== this.inputRows) this.resizeInput(rows)
+    if (rows !== this.inputRows || this.laidBottom !== rows + 1 + (plain ? 1 : 0)) this.resizeInput(rows)
     const rowsAvail = Math.max(1, rows - this.headerRows)
     this.inputLines = lines
     this.inputTop = Math.max(0, Math.min(row - (rowsAvail - 1), lines.length - rowsAvail))
@@ -2886,12 +2961,21 @@ export class Ui {
       // cursor, whose inverse closes it, and every tag closed at the band's end ({/}), or blessed would carry the
       // background on to the row's end.
       const bg = this.bubbleBg.mine
-      const band = (s: string) => ` {${bg}-bg} ${s.replace(/\{\/inverse\}/g, `{/inverse}{${bg}-bg}`)}${' '.repeat(Math.max(0, width - visibleWidth(s)))} {/}`
+      const band = (s: string) => ` {${bg}-bg} ${s.replace(/\{\/inverse\}/g, `{/inverse}{${bg}-bg}`)}${' '.repeat(Math.max(0, bandW - visibleWidth(s)))} {/}`
       out = visible.map((l, i) => band(render(l, this.inputTop + i)))
       while (out.length < rowsAvail) out.push(band(''))
       // The confirmation a deletion waits for, in the colour of errors; what's being replied to or edited, faint.
-      const said = esc(truncate(header ?? '', width))
+      const said = esc(truncate(header ?? '', bandW))
       if (this.headerRows) out.unshift(band(this.deleting ? `{${FG.error}-fg}${said}{/${FG.error}-fg}` : dim(said)))
+      // "↓" goes beside the band's first text row, in the time's column.
+      const first = this.headerRows
+      this.belowRow = first
+      const below = this.belowShown = this.belowCount()
+      this.borderBelow = Infinity
+      if (!this.atBottom && first >= 0 && !this.pickerOpen) {
+        out[first] += ` ${dim(esc(below ? `↓ ${below}` : '↓'))}`
+        this.borderBelow = bandW + 3
+      }
     }
     this.input.setContent(out.join('\n'))
     this.borderHeader = plain ? header : null
@@ -2899,7 +2983,7 @@ export class Ui {
     // The correction floats one line above its word's line, when that line is in view: the input takes the last
     // `rows` lines, the prompt its first columns, after the padding.
     if (ghostAbove && ghostLine >= this.inputTop && ghostLine < this.inputTop + rowsAvail) {
-      this.ghostBox.top = num(this.screen.height) - rows + this.headerRows + (ghostLine - this.inputTop) - 1
+      this.ghostBox.top = num(this.screen.height) - 1 - rows + this.headerRows + (ghostLine - this.inputTop) - 1
       // A cell of its background on either side, the word itself on the column of the one it replaces.
       this.ghostBox.left = num(this.input.aleft) + num(this.input.ileft) + pw + ghostCol - 1
       this.ghostBox.width = strWidth(ghostAbove) + 2
@@ -3004,10 +3088,11 @@ export class Ui {
   private resizeInput(rows: number) {
     this.inputRows = rows
     this.input.height = rows
-    this.input.top = `100%-${this.bottom - 2}`
-    this.ruleTop.top = `100%-${this.bottom}`
-    this.msgBox.height = `100%-${this.bottom + this.barRows}`
-    this.picker.height = `100%-${this.bottom + this.barRows}`
+    this.laidBottom = this.bottom
+    this.input.top = `100%-${rows + 1}`
+    this.ruleTop.top = `100%-${rows + 2}`
+    this.msgBox.height = `100%-${this.bottom}`
+    this.picker.height = `100%-${this.bottom + 1}`
     this.dirtyMessages = true
     this.dirtyTabs = true
     if (this.suggestions.length) this.drawSuggestions()
@@ -3257,8 +3342,8 @@ export class Ui {
     else if (pin) { const first = this.firstLineOf(pin.id); if (first != null) this.msgBox.scrollTo(first - pin.offset) }
     this.renderedJid = jid
     this.loadingDrawn = loading
-    // What's below the view, said over the input, follows the messages.
-    this.drawBorder()
+    // What's below the view, said beside the band, follows the messages.
+    if (!this.plainInput && this.belowCount() !== this.belowShown) this.drawInput()
     if (f?.arrived && f.frame >= FLY_FRAMES) this.landed(false)
   }
 
@@ -3481,7 +3566,7 @@ export class Ui {
 
   /** Opens a chat's photo in the popup, as large as it fits, with its description: a click on it in the list. */
   private openPhoto(jid: string) {
-    const avatar = this.profiles.get(jid)?.avatar
+    const avatar = (this.profiles.get(jid) ?? store.getProfile(jid))?.avatar
     if (!avatar) return
     this.viewing = { key: `photo ${jid}`, path: path.join(mediaDir(jid), avatar) }
     this.viewerBox.show()
@@ -3592,6 +3677,8 @@ export class Ui {
     this.kitty.clear()
     const v = this.viewerImg
     if (v) return this.kitty.place(v.path, v.d, v.x + 1, v.y + 1, v.cols, v.rows)
+    // The chats' photos in their tabs, before the names.
+    for (const tp of this.tabPhotos) this.kitty.place(tp.path, tp.d, num(this.tabsBar.aleft) + tp.x + 1, num(this.tabsBar.atop) + 1, 2, 1)
     // With the list open, the pictures of the chats whose two rows are in view.
     if (this.pickerOpen) {
       for (const a of this.visibleAvatars()) this.kitty.place(a.path, a.d, a.x + 1, a.y + 1, 4, 2)
@@ -3682,24 +3769,29 @@ export class Ui {
         pictureRow(grid, 4, 1, a.x, a.y + 1)
       }
     }
+    // The tabs' photos, in half-blocks.
+    for (const tp of this.mode === 'blocks' ? this.tabPhotos : []) pictureRow(blockGrid(tp.d, 2, 1), 2, 0, num(this.tabsBar.aleft) + tp.x, num(this.tabsBar.atop))
     // The popup's picture, over the panel.
     const v = this.mode === 'blocks' ? this.viewerImg : undefined
     if (v) {
       const grid = blockGrid(v.d, v.cols, v.rows)
       for (let r = 0; r < v.rows; r++) pictureRow(grid, v.cols, r, v.x, v.y + r)
     }
-    // The bubbles' cells: the message panel's and the rows under it, where the next messages are (the other side's
-    // still to come, mine being written, the one just sent flying), or, with the chat list open, the selected chat's row.
-    const box = this.pickerOpen ? this.picker : this.current && !this.showingQr ? this.msgBox : null
-    if (this.bubbleRgb && box) {
+    // The bubbles' cells: the message panel's and the rows under it (the text being written, the one just sent flying,
+    // the tabs), or, with the chat list open, its rows (the selected chat's) and the same rows under it, where the
+    // filter is written over its tab.
+    const W = num(this.screen.width), H = num(this.screen.height)
+    const p = this.picker
+    const regions = this.pickerOpen
+      ? [{ x0: num(p.aleft) + num(p.ileft), y0: num(p.atop) + num(p.itop), x1: num(p.aleft) + num(p.width) - num(p.iwidth) + num(p.ileft), y1: num(p.atop) + num(p.height) - num(p.iheight) + num(p.itop) },
+        { x0: 0, y0: num(this.input.atop), x1: W, y1: H }]
+      : this.current && !this.showingQr ? [{ x0: 0, y0: num(this.msgBox.atop) + num(this.msgBox.itop), x1: W, y1: H }] : []
+    if (this.bubbleRgb && regions.length) {
       const lines = this.screenRows('lines')
       const bubbles = { [this.bubbleBg.mine]: this.bubbleRgb.mine, [this.bubbleBg.theirs]: this.bubbleRgb.theirs } as Record<number, string>
-      const x0 = box === this.picker ? num(box.aleft) + num(box.ileft) : 0, y0 = num(box.atop) + num(box.itop)
-      const x1 = box === this.picker ? x0 + num(box.width) - num(box.iwidth) : num(this.screen.width)
-      const y1 = box === this.picker ? y0 + num(box.height) - num(box.iheight) : num(this.screen.height)
       // blessed's attribute flags as SGR codes: bold, underline, blink, inverse, invisible, and italic (italic.ts).
       const FLAGS: [number, number][] = [[1, 1], [2, 4], [4, 5], [8, 7], [16, 8], [32, 3]]
-      for (let y = y0; y < y1; y++) {
+      for (const { x0, y0, x1, y1 } of regions) for (let y = y0; y < y1; y++) {
         const row = lines[y]
         if (!row) continue
         for (let x = x0; x < x1; x++) {
@@ -3718,55 +3810,20 @@ export class Ui {
     this.rgbPaint.paint(cells, olines)
   }
 
-  /**
-   * The two rows over the text being written. In a chat, the other side's next message, still to come: a bubble in
-   * their messages' grey with the chat's name in its colour, bold, and its state's emoji (moodOf); beside it, as their messages' time, "online" while they're online (in a group, how
-   * many of its members are), or, offline, the time of their last sign. While the messages above are scrolled up, a
-   * faint line on from it, with how many messages are below. Then a row, blank as between messages, but for dots
-   * coming one after another under the name while someone there types. With the chat list open or a search, a blank
-   * row and a faint rule over the line, with the search's count (borderHeader).
-   */
+  /** The faint rule over the plain line, with the search's count (borderHeader); none over the band, in a chat. */
   private drawBorder() {
-    const width = num(this.screen.width)
-    const h = this.ruleChar
-    const line = (s: string) => (s ? faint(esc(s)) : '')
-    const jid = this.current
-    if (this.pickerOpen || this.search || !jid) {
-      const header = this.borderHeader ? ` ${truncate(this.borderHeader, Math.max(1, width - 6))} ` : ''
-      this.borderName = { x0: 0, x1: 0 }
-      this.ruleTop.setContent(`\n${line(h.repeat(2))}${dim(esc(header))}${line(h.repeat(Math.max(0, width - 2 - strWidth(header))))}`)
-      return
-    }
-    const group = jid.endsWith('@g.us')
-    const online = group ? this.groupOnline.get(jid) ?? 0 : this.online.has(jid) ? 1 : 0
-    // Their last sign: the latest of what the server kept from their presence (online, typing, or the time WhatsApp
-    // gives when they share it) and their last message here; for someone who hides their presence, only that.
-    const lastSent = [...this.rows].reverse().find(r => r.chat_jid === jid && !r.from_me)?.ts ?? 0
-    const seen = group ? undefined : Math.max(store.getState<number>(`seen:${jid}`) ?? 0, lastSent) || undefined
-    // While they type, dots under the name, on the blank row (typingDots), so the bubble doesn't move.
-    const dots = this.typing.has(jid) ? `  ${faint(typingDots())}` : ''
-    // Outside the bubble, as their messages' time: "online" while they are (in a group, how many), or their last sign.
-    const said = online ? (group ? t('onlineCount', online) : t('online')) : seen ? fmtWhenAt(seen) : ''
-    const after = said ? ` ${faint(esc(said))}` : ''
-    // As their messages: the panel's padding column, then the bubble, a spare column on either side of the text.
-    const mood = this.moodOf(jid, store.getChat(jid)?.last_ts)
-    const room = Math.max(6, width - 4 - visibleWidth(after) - strWidth(mood))
-    const name = truncate(chatName(jid), room)
-    const color = colorFor(jid), bg = this.bubbleBg.theirs
-    const text = `{${color}-fg}{bold}${esc(name)}{/bold}{/${color}-fg}${mood}`
-    this.borderName = { x0: 2, x1: 2 + strWidth(name) }
-    const bubble = ` {${bg}-bg} ${text} {/${bg}-bg}${after}`
-    // Scrolled up: the bubble isn't the last thing said, and a line on from it says so, with how many are below.
-    let rest = ''
-    this.borderBelow = Infinity
-    if (!this.atBottom) {
-      const base = this.msgBox.childBase + this.innerHeight()
-      const below = new Set(this.lineMap.slice(base).filter((r): r is MessageRow => !!r).map(r => r.id)).size
-      const tail = below ? ` ↓ ${below} ` : ' ↓ '
-      const fill = width - visibleWidth(bubble) - 1 - strWidth(tail) - 1
-      if (fill > 2) { rest = ` ${line(h.repeat(fill))}${dim(esc(tail))}`; this.borderBelow = visibleWidth(bubble) + 1 }
-    }
-    this.ruleTop.setContent(`${bubble}${rest}\n${dots}`)
+    if (!this.plainInput) return void this.ruleTop.hide()
+    const width = num(this.screen.width), h = this.ruleChar
+    const header = this.borderHeader ? ` ${truncate(this.borderHeader, Math.max(1, width - 6))} ` : ''
+    this.ruleTop.setContent(`${faint(esc(h.repeat(2)))}${dim(esc(header))}${faint(esc(h.repeat(Math.max(0, width - 2 - strWidth(header)))))}`)
+    this.ruleTop.show()
+  }
+
+  /** How many messages are below the view, all of their rows out of it; 0 at the bottom. */
+  private belowCount(): number {
+    if (this.atBottom) return 0
+    const base = this.msgBox.childBase + this.innerHeight()
+    return new Set(this.lineMap.slice(base).filter((r): r is MessageRow => !!r).map(r => r.id)).size
   }
 
   private redraw() {

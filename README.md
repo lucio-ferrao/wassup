@@ -37,38 +37,43 @@ texts, the emoji names and the language of the writing suggestions.
 
 ## Interface
 
-The tab bar at the top with the connection state on the right, messages across the full width under it, and under
-them, as the conversation's next two messages, the other side's still to come and yours being written. The first is a
-bubble in their messages' grey with the chat's name in the colour it has in groups and its state's emoji (see Writing
-suggestions), and under it, faint, dots coming one after another (`.`, `..`, `...`) while they type, the bubble left
-as it is; beside it, as their messages' time, "online" while the person is online (in a group, how many of the 30 who
-wrote most recently are), or, while they're offline, the time of their last sign: the latest of their being online or
-typing, the time WhatsApp gives for someone who shares it (both kept by the server), and their last message; while the
-messages are scrolled up, a line on from it says how many are below. Under it you write on your bubbles' green, in a
-band as wide as your bubbles can be, so the text wraps where the message will, growing upwards with it; when it's
+Messages across the full width, and under them, as your next message, the text being written on your bubbles' green,
+in a band as wide as your bubbles can be, growing upwards with the text; while the messages are scrolled up, `↓` and
+how many are below sit beside the band, where the time goes, and a click on them goes down to the latest. When it's
 sent, the conversation first moves up to make room for it, and then the band narrows to the bubble and rises into that
-room. Beyond the bubbles, no backgrounds of its own: the colours are the terminal theme's, and on startup the terminal
-is asked for its real background colour to pick light or dark shades.
+room. Under the band, the tab bar, with the connection state on the right. Beyond the bubbles, no backgrounds of its
+own: the colours are the terminal theme's, and on startup the terminal is asked for its real background colour to pick
+light or dark shades.
 
-- **Tabs**: one per open chat, with the unread count in red and an `×` to close. Tab cycles through them, or, with
-  only one open, opens the chat list; whatever is left unsent stays with each chat. While someone is typing in another
-  chat, dots come one after another before its name in the tab (`.`, `‥`, `…`). New messages in a chat without a tab
-  open one without activating it, with a passing notice over it and the bell; an archived chat stays quiet.
-- **Chats**: `wa` starts on the list, and `/`, or a click on the other side's name over the input, opens it again,
-  under the app's name, most recent at the bottom, under day separators (today, yesterday, this week, older), a blank
+- **Tabs**: one per open chat, under the band where you write: the chat's photo (two cells by one, real pixels with
+  Kitty, half-blocks otherwise; a click on it opens it large), its name and its state's emoji (see Writing
+  suggestions), and the unread count in red; the active one on the band's green, as its label, its name in the colour
+  it has in groups, the others on a quieter grey. A click on another tab goes to that chat, on the active one opens
+  the chat list; Esc closes the active one. Tab cycles through them, or, with only one open, opens the chat list;
+  whatever is left unsent stays with each chat. While someone is typing in a chat, two emoji take turns in its tab
+  where its state's emoji is (💬, 💭). New messages in a chat without a tab open one without activating it, with a
+  passing notice over it and the bell; an archived chat stays quiet.
+- **Chats**: `wa` starts on the list, and `/`, or a click on the active tab, opens it again, under the app's name,
+  most recent at the bottom, under a separator for each day, as the messages are (`hoje`, `ontem`, `12 set`), a blank
   row between chats. Each takes two rows, its photo from WhatsApp on the left of both (four cells by two, real pixels
   with Kitty, half-blocks otherwise; its initials on its colour without one). On the first row, the name in its
-  colour, its state's emoji, 👀 while the person is online, and at the right edge when the last message was (`21:35`,
-  `ontem 21:35`, `12 set 21:35`); on a wide screen the list stops at 60 columns, so the time stays near the name. On
-  the second, under the name, the unread count, or without unread messages the person's number (without the country
-  code when it's the same as mine) or a group's number of members, and "typing" with dots coming one after another
-  while someone types. Photos, "abouts" and group sizes are asked of WhatsApp for the chats in view, at most once a
-  day, and kept; a click on a photo opens it large, with its description, as images do. Typing after `wassup ❯`
-  filters it word by word, ignoring accents and case, with the matches underlined; Enter, Tab, → or a click opens.
-  Ctrl+F there searches the messages of every chat instead (`procurar ❯`, again or Esc back to the names): from two
-  characters on, the list holds those that have all the words, the most recent at the bottom, each as its chat, who
-  wrote it and when, and two lines of its text from a little before the match, the matches in reverse video; Enter or
-  a click opens the chat on that message.
+  colour, its state's emoji (or, while someone types there, 💬 and 💭 taking turns in its place), the unread count in
+  red, as the tabs have them, 👀 while the person is online, and at the right edge the time of the last message, its
+  day being its separator's (with a filter, which has no separators, the day too: `ontem 21:35`, `12 set 21:35`), in
+  the column your messages' times end in. On the second, under the name, the person's number (without the country code
+  when it's the same as mine, and 💼 after it for a WhatsApp Business account, known from its messages or its business
+  profile) or a group's number of members. The selected chat is on the green of the band where you write, as the
+  active tab is, up to its time, which stays out flush right, as a message's does. Your chat with yourself goes by
+  your profile name and "(eu)", where WhatsApp gives only a masked number. Photos, "abouts" and group sizes are asked
+  of WhatsApp for the chats in view, at most once a day, and kept; a chat opened whose person has no name here (only
+  the number, or the masked one WhatsApp gives for someone not saved) has its latest messages asked of the phone
+  again, at most once a day, as its copy may carry the profile name; a click on a photo opens it large, with its
+  description, as images do. What's typed in the band, with the list's own tab, `conversas`, active under it, filters
+  it word by word, ignoring accents and case, with the matches underlined; Enter, Tab, → or a click opens. Ctrl+F
+  there searches the messages of every chat instead (the tab says `procurar`; again or Esc back to the names): from
+  two characters on, the list holds those that have all the words, the most recent at the bottom, each as its chat,
+  who wrote it and when, and two lines of its text from a little before the match, the matches in reverse video; Enter
+  or a click opens the chat on that message.
 - **Messages**: yours on the right, each in a bubble with WhatsApp Web's colours where the terminal takes 24-bit
   colour (yours, on a dark theme, toned down to the brightness of theirs) and two discreet greys otherwise, with the
   time outside it, yours with their state in its separator (`14 06` not sent yet, `14.06` sent, `14:06` delivered;
@@ -94,14 +99,14 @@ is asked for its real background colour to pick light or dark shades.
   ↑/↓, Enter, Tab, → or a click pick one. In a group, `@` lists those who wrote in it, most recent first, narrowed by
   the start of any of their names (`@lem` finds Rita Lemos); the one picked goes in as `@Rita` (the whole name when
   two share the first), and the message goes out mentioning them, as the phone does.
-- Esc closes, in order: the filter, the list, the active tab. Closing the last tab quits. Ctrl-C quits at once;
-  Ctrl-R redraws the screen.
+- Esc closes, in order: the filter, the list, the active tab. Closing the last tab goes back to the list, and Esc
+  there, with no tab left, quits. Ctrl-C quits at once; Ctrl-R redraws the screen.
 - **Several terminals**: the first process is the server with the WhatsApp connection; the next ones connect to it
   through a socket and are interface only, each with its own tabs. If the server ends, another one takes over.
-- **Single chat**: `wa <name>` opens only that chat, without the tab bar or notices from others; the `/` list swaps
-  it. An emoji on its own, as a message or a reaction, sends a big copy of it floating up the panel, drawn in block
-  characters from the system's emoji font (the same glyph and colours the terminal shows), or, where the system has no
-  colour one, from the Noto Color Emoji that comes with wassup; needs `sharp`.
+- **Single chat**: `wa <name>` opens only that chat, its tab alone under the band, without notices from others; the
+  `/` list swaps it. An emoji on its own, as a message or a reaction, sends a big copy of it floating up the panel,
+  drawn in block characters from the system's emoji font (the same glyph and colours the terminal shows), or, where
+  the system has no colour one, from the Noto Color Emoji that comes with wassup; needs `sharp`.
 
 ### Herdr
 
@@ -113,7 +118,7 @@ with nothing typed, moves to the next conversation's pane or tab, in the order H
 one, opens the chat list. wassup shows up in Herdr's agent list under the chat's name alone: `working` while the other
 person types, `done` (blue) from a new message (or when they stop typing) until you look at its pane, `idle`
 otherwise; alone in its tab, the tab takes the contact's first name. Outside Herdr the terminal window title carries
-the name, with `●` for unread messages or dots coming one after another (`.`, `‥`, `…`) while they type.
+the name, with `●` for unread messages or the same two emoji taking turns while they type.
 
 ### Formatting and emoji
 
