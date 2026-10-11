@@ -39,16 +39,16 @@ texts, the emoji names and the language of the writing suggestions.
 
 The tab bar at the top with the connection state on the right, messages across the full width under it, and under
 them, as the conversation's next two messages, the other side's still to come and yours being written. The first is a
-bubble in their messages' grey with the chat's name in the colour it has in groups, and under it, faint, dots coming
-one after another (`.`, `..`, `...`) while they type, the bubble left as it is; beside it, as their messages' time,
-"online" while the person is online (in a group, how many of the 30 who wrote most recently are), or, while they're
-offline, the time of their last sign: the latest of their being online or typing, the time WhatsApp gives for someone
-who shares it (both kept by the server), and their last message; while the messages are scrolled up, a line on from it
-says how many are below. Under it you write on your bubbles' green, in a band as wide as your bubbles can be, so the
-text wraps where the message will, growing upwards with it; when it's sent, the conversation first moves up to make
-room for it, and then the band narrows to the bubble and rises into that room. Beyond the bubbles, no backgrounds of
-its own: the colours are the terminal theme's, and on startup the terminal is asked for its real background colour to
-pick light or dark shades.
+bubble in their messages' grey with the chat's name in the colour it has in groups and its state's emoji (see Writing
+suggestions), and under it, faint, dots coming one after another (`.`, `..`, `...`) while they type, the bubble left
+as it is; beside it, as their messages' time, "online" while the person is online (in a group, how many of the 30 who
+wrote most recently are), or, while they're offline, the time of their last sign: the latest of their being online or
+typing, the time WhatsApp gives for someone who shares it (both kept by the server), and their last message; while the
+messages are scrolled up, a line on from it says how many are below. Under it you write on your bubbles' green, in a
+band as wide as your bubbles can be, so the text wraps where the message will, growing upwards with it; when it's
+sent, the conversation first moves up to make room for it, and then the band narrows to the bubble and rises into that
+room. Beyond the bubbles, no backgrounds of its own: the colours are the terminal theme's, and on startup the terminal
+is asked for its real background colour to pick light or dark shades.
 
 - **Tabs**: one per open chat, with the unread count in red and an `×` to close. Tab cycles through them, or, with
   only one open, opens the chat list; whatever is left unsent stays with each chat. While someone is typing in another
@@ -58,17 +58,17 @@ pick light or dark shades.
   under the app's name, most recent at the bottom, under day separators (today, yesterday, this week, older), a blank
   row between chats. Each takes two rows, its photo from WhatsApp on the left of both (four cells by two, real pixels
   with Kitty, half-blocks otherwise; its initials on its colour without one). On the first row, the name in its
-  colour, 👀 while the person is online, and at the right edge when the last message was (`21:35`, `ontem 21:35`, `12
-  set 21:35`); on a wide screen the list stops at 60 columns, so the time stays near the name. On the second, under
-  the name, the unread count, or without unread messages the person's number (without the country code when it's the
-  same as mine) or a group's number of members, and "typing" with dots coming one after another while someone types.
-  Photos, "abouts" and group sizes are asked of WhatsApp for the chats in view, at most once a day, and kept; a click
-  on a photo opens it large, with its description, as images do. Typing after `wassup ❯` filters it word by word,
-  ignoring accents and case, with the matches underlined; Enter, Tab, → or a click opens. Ctrl+F there searches the
-  messages of every chat instead (`procurar ❯`, again or Esc back to the names): from two characters on, the list
-  holds those that have all the words, the most recent at the bottom, each as its chat, who wrote it and when, and two
-  lines of its text from a little before the match, the matches in reverse video; Enter or a click opens the chat on
-  that message.
+  colour, its state's emoji, 👀 while the person is online, and at the right edge when the last message was (`21:35`,
+  `ontem 21:35`, `12 set 21:35`); on a wide screen the list stops at 60 columns, so the time stays near the name. On
+  the second, under the name, the unread count, or without unread messages the person's number (without the country
+  code when it's the same as mine) or a group's number of members, and "typing" with dots coming one after another
+  while someone types. Photos, "abouts" and group sizes are asked of WhatsApp for the chats in view, at most once a
+  day, and kept; a click on a photo opens it large, with its description, as images do. Typing after `wassup ❯`
+  filters it word by word, ignoring accents and case, with the matches underlined; Enter, Tab, → or a click opens.
+  Ctrl+F there searches the messages of every chat instead (`procurar ❯`, again or Esc back to the names): from two
+  characters on, the list holds those that have all the words, the most recent at the bottom, each as its chat, who
+  wrote it and when, and two lines of its text from a little before the match, the matches in reverse video; Enter or
+  a click opens the chat on that message.
 - **Messages**: yours on the right, each in a bubble with WhatsApp Web's colours where the terminal takes 24-bit
   colour (yours, on a dark theme, toned down to the brightness of theirs) and two discreet greys otherwise, with the
   time outside it, yours with their state in its separator (`14 06` not sent yet, `14.06` sent, `14:06` delivered;
@@ -156,6 +156,14 @@ Your last text message is checked the same way once sent, and an earlier one whe
 lets them be edited (15 minutes): the wrong passages are underlined in yellow in the bubble; a click on one floats its
 correction above it, and a click on that edits the message with it. The marks go when the 15 minutes are up.
 
+Each chat also gets a state, one emoji the model picks for the conversation now (its tone and what's going on), from
+its latest messages, as many as fit in the model's context; it shows after the chat's name, over the input and in the
+chat list, while the chat's last message is no more than a week old. The server works them out calmly, as the model
+takes one request at a time: only for chats with new messages, quiet for two minutes, open in a terminal or active in
+the last day, from the most recent to the oldest; one at a time, a look every 30 seconds; never while you're writing
+in a terminal (a request under way gives way); and waking the model when it's asleep, its requests keeping it awake
+while the queue goes through.
+
 ## Data
 
 Everything lives in `~/.config/wa` (or `WA_HOME`), readable by this user only (mode 700, umask 077 for whatever is
@@ -187,6 +195,7 @@ History starts with what WhatsApp sends to new devices. `WA_FULL_HISTORY=1` asks
 | `src/herdr.ts` | Agent state, titles and tabs in Herdr |
 | `src/hearts.ts` | Animated emoji rising from a single-emoji message or reaction |
 | `src/i18n.ts` | Interface strings in Portuguese and English |
-| `src/llm.ts` | Writing suggestions and image descriptions from the local `llama-server` |
+| `src/llm.ts` | Writing suggestions, image descriptions and chats' states from the local `llama-server` |
+| `src/mood.ts` | Each chat's state as an emoji, worked out calmly by the server |
 | `src/spell.ts` | Local spell checker (Hunspell, pt-PT and English) when there's no model |
 | `src/emoji.ts`, `src/italic.ts`, `src/rainbow.ts` | `:name:` table, italics in blessed, colours |

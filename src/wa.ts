@@ -12,6 +12,7 @@ import { dirs } from './config.js'
 import { t } from './i18n.js'
 import { logger } from './log.js'
 import { store, type MessageRow } from './db.js'
+import { MoodKeeper } from './mood.js'
 
 export type ConnState = 'connecting' | 'qr' | 'open' | 'closed'
 
@@ -31,6 +32,8 @@ export interface WaEvents {
   groupOnline: [groupJid: string, count: number]
   /** A chat's photo, "about" or group size has just been stored (ensureProfile). */
   profile: [jid: string]
+  /** A chat's state, an emoji, has just been worked out and stored (MoodKeeper). */
+  mood: [jid: string]
   /** Whether this device shows as online to the others: from activity in a terminal until two idle minutes. */
   available: [on: boolean]
   /** Only from the remote client: the server process disappeared. */
@@ -387,6 +390,8 @@ export class Wa extends EventEmitter<WaEvents> {
   private groupCache = new Map<string, GroupMetadata>()
   private downloading = new Set<string>()
   private stopped = false
+  /** Each chat's state as an emoji, worked out calmly by the local model for the terminals (mood.ts). */
+  private moods = new MoodKeeper(row => this.moodLine(row), jid => this.emit('mood', jid))
 
   async start() {
     // Only the server process writes, so the stored delivery states are put right here, once per start.
@@ -440,6 +445,7 @@ export class Wa extends EventEmitter<WaEvents> {
    */
   async stop() {
     this.stopped = true
+    this.moods.stop()
     if (this.presenceTimer) { clearTimeout(this.presenceTimer); this.presenceTimer = undefined }
     const sock = this.sock
     if (!sock) return
@@ -519,6 +525,7 @@ export class Wa extends EventEmitter<WaEvents> {
         this.markAvailable(false)
         // Profiles asked for while it was down are asked now.
         void this.nextProfile()
+        this.moods.start()
         this.setState('open', this.me)
         this.refreshGroups().catch(e => logger.warn({ e }, 'refreshGroups'))
       } else if (connection === 'close') {
@@ -923,7 +930,17 @@ export class Wa extends EventEmitter<WaEvents> {
 
   /** Tells the chat that we're typing (or that we stopped): it's the "typing…" that the other person sees. */
   setComposing(chatJid: string, on: boolean) {
+    // While I write, the local model is left to the writing suggestions.
+    if (on) this.moods.writing()
     this.sock?.sendPresenceUpdate(on ? 'composing' : 'paused', chatJid).catch(e => logger.warn({ e, chatJid }, 'setComposing'))
+  }
+
+  /** A message as the model reads it to work out the chat's state: who wrote it and its text, or what it is. */
+  private moodLine(row: MessageRow): string | null {
+    if (row.type === 'deleted' || row.type === 'secretEncrypted' || row.type === 'reaction') return null
+    const who = row.from_me ? t('me') : this.isGroup(row.chat_jid) ? contactName(row.sender_jid) : chatName(row.chat_jid)
+    const text = (row.text || `[${typeLabel(row)}]`).replace(/\s+/g, ' ').slice(0, 500)
+    return `${who}: ${text}`
   }
 
   /**

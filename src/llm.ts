@@ -2,8 +2,8 @@
  * Writing suggestions from a local model (llama-server, an OpenAI-compatible API), of only two kinds: the word
  * that's half-typed at the cursor, completed or corrected, and the corrections of the wrong words already written in
  * the sentence (spelling, words stuck together, a word swapped in an expression, grammar, punctuation), all of them.
- * Also a short description of an image, for the selected one when images are drawn in half-blocks. Turned off with
- * WA_LLM=off; with no server responding, suggestions and descriptions simply don't appear.
+ * Also a short description of an image, for the selected one when images are drawn in half-blocks, and each chat's
+ * state as one emoji (mood.ts). Turned off with WA_LLM=off; with no server responding, they simply don't appear.
  */
 import { logger } from './log.js'
 import { fold } from './format.js'
@@ -214,4 +214,49 @@ export async function describe(png: Buffer, signal: AbortSignal): Promise<string
   if (!res.ok) { logger.warn({ status: res.status }, 'llm: describe'); return null }
   const data = (await res.json()) as { choices?: { message?: { content?: string } }[] }
   return data.choices?.[0]?.message?.content?.replace(/\s+/g, ' ').trim() || null
+}
+
+/**
+ * The model's context, in tokens: for a llama-server that loads its models on demand, from the arguments this one
+ * runs with; for a plain llama-server, the context it says it has. 0 with no server answering.
+ */
+export async function modelInfo(): Promise<{ ctx: number }> {
+  try {
+    const res = await fetch(`${URL}/v1/models`, { signal: AbortSignal.timeout(3000) })
+    const data = (await res.json()) as { data?: { id: string; status?: { value?: string; args?: string[] } }[] }
+    const m = data.data?.find(d => d.id === MODEL)
+    if (m?.status) {
+      const args = m.status.args ?? []
+      const at = args.findIndex(a => a === '-c' || a === '--ctx-size')
+      return { ctx: Number(args[at + 1]) || 8192 }
+    }
+    const props = (await (await fetch(`${URL}/props`, { signal: AbortSignal.timeout(3000) })).json()) as { default_generation_settings?: { n_ctx?: number } }
+    return { ctx: props.default_generation_settings?.n_ctx || 8192 }
+  } catch {
+    return { ctx: 0 }
+  }
+}
+
+const MOOD = lang === 'pt'
+  ? 'Recebes as mensagens mais recentes de uma conversa de WhatsApp, da mais antiga para a mais recente, cada uma com quem a escreveu. Responde só com JSON: {"emoji": "…"}, um único emoji que diga o estado da conversa agora: o tom e o que se está a passar (por exemplo, combinar um encontro, uma pergunta à espera de resposta, carinho, preocupação, brincadeira, trabalho, uma despedida).'
+  : 'You get the latest messages of a WhatsApp chat, oldest first, each with who wrote it. Answer only with JSON: {"emoji": "…"}, a single emoji that tells the state of the conversation now: its tone and what is going on (for example, arranging to meet, a question waiting for an answer, affection, worry, joking, work, a goodbye).'
+
+/** One emoji for the state of a conversation, from its latest messages (`lines`, "who: text", oldest first); null for none. */
+export async function mood(lines: string[], signal: AbortSignal): Promise<string | null> {
+  const body = {
+    model: MODEL,
+    temperature: 0,
+    max_tokens: 20,
+    reasoning_effort: 'none',
+    chat_template_kwargs: { enable_thinking: false },
+    response_format: { type: 'json_schema', json_schema: { name: 'mood', schema: { type: 'object', properties: { emoji: { type: 'string', maxLength: 16 } }, required: ['emoji'], additionalProperties: false } } },
+    messages: [{ role: 'system', content: MOOD }, { role: 'user', content: lines.join('\n') }],
+  }
+  const res = await fetch(`${URL}/v1/chat/completions`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal })
+  if (!res.ok) { logger.warn({ status: res.status }, 'llm: mood'); return null }
+  const data = (await res.json()) as { choices?: { message?: { content?: string } }[] }
+  let emoji = ''
+  try { emoji = String((JSON.parse(data.choices?.[0]?.message?.content ?? '{}') as { emoji?: unknown }).emoji ?? '') } catch { return null }
+  // The first emoji in what came, its variation selector with it; anything else isn't one.
+  return /\p{Extended_Pictographic}️?/u.exec(emoji)?.[0] ?? null
 }

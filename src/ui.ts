@@ -4,6 +4,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import QRCode from 'qrcode'
 import { store, type ChatRow, type MessageRow, type ProfileRow, type ReactionRow } from './db.js'
+import type { Mood } from './mood.js'
 import { chatName, contactName, shortName, canonicalJid, thumbPath, previewPath, hasPreviewImage, mediaFile, mediaDir, jidUser, withMentions, typeLabel, pinTarget, type ConnState } from './wa.js'
 import { inHerdr, reportHerdr, doneHerdr, titleHerdr, tabNameHerdr, releaseHerdr, openChatHerdr, focusHerdr, focusNextChatHerdr, paneFocusedHerdr } from './herdr.js'
 import type { Backend } from './backend.js'
@@ -75,6 +76,8 @@ const typingDot = () => ['.', '‥', '…'][Math.floor(Date.now() / 400) % 3]!
  * dot), "14:06" delivered or read (two). Which was read the "❮" after the time of the last one says (renderMessages).
  */
 const myTime = (ts: number, status: number) => fmtTime(ts).replace(':', status >= 3 ? ':' : status >= 2 ? '.' : ' ')
+/** A chat's state (moods) shows only while its last message is at most this old, in seconds: a week. */
+const MOOD_AGE = 7 * 24 * 3600
 /** How many of a chat's latest messages the panel draws at first, and how many more each scroll past the top adds. */
 const PAGE = 300
 /**
@@ -273,6 +276,8 @@ export class Ui {
   private myJid = store.getState<string>('me') ?? ''
   /** What WhatsApp says of each chat (Wa.ensureProfile), the chats already asked for, and each row's decoded picture. */
   private profiles = new Map<string, ProfileRow>()
+  /** Each chat's state, as the emoji the server worked out from its messages (mood.ts), shown after its name. */
+  private moods = this.loadMoods()
   private profileAsked = new Set<string>()
   private pickerAvatars = new Map<number, { path: string; d: Decoded }>()
   /** The photos whose small copy is being decoded (loadVisibleProfiles). */
@@ -851,6 +856,12 @@ export class Ui {
       const p = store.getProfile(jid)
       if (p) this.profiles.set(jid, p)
       if (this.pickerOpen) { this.redrawPickerRows([jid]); this.scheduleRender() }
+    })
+    this.wa.on('mood', jid => {
+      this.moods.set(jid, store.getState<Mood>(`mood:${jid}`)?.emoji ?? '')
+      if (this.pickerOpen) this.redrawPickerRows([jid])
+      if (jid === this.current) this.drawBorder()
+      this.scheduleRender()
     })
     this.wa.on('typing', (jid, who) => this.onTyping(jid, who.length > 0))
     this.wa.on('available', on => { this.available = on })
@@ -2035,6 +2046,7 @@ export class Ui {
     this.pickerAvatars.clear()
     this.pickerLit = []
     this.profiles = new Map(store.listProfiles().map(p => [p.jid, p]))
+    this.moods = this.loadMoods()
     const hits = this.pickerSearch && this.filter.trim().length >= 2 ? this.searchAll(this.filter) : []
     for (const m of hits) {
       const chat = store.getChat(m.chat_jid)
@@ -2114,8 +2126,9 @@ export class Ui {
 
   /**
    * A chat's two rows in the list, the photo (avatarCells) in the first four cells of both. On the first, its name in
-   * the colour it has as a sender in groups (bold with unread messages, the filter's words underlined), 👀 while the
-   * person is online, "·" when it has a tab, and at the right edge when the last message was (fmtWhenAt). On the
+   * the colour it has as a sender in groups (bold with unread messages, the filter's words underlined), its state's
+   * emoji (moodOf), 👀 while the person is online, "·" when it has a tab, and at the right edge when the last message
+   * was (fmtWhenAt). On the
    * second, under the name, the unread count, in WhatsApp's green, or without unread messages the person's number or
    * the group's size (chatNumber), and "a escrever" with dots coming one after another while someone types there. The
    * second row comes in its parts (see pickerParts).
@@ -2127,9 +2140,10 @@ export class Ui {
     const open = this.tabs.includes(c.jid) ? ' ·' : ''
     const ts = this.pickerLast.get(c.jid)?.ts ?? c.last_ts
     const when = ts ? faint(esc(fmtWhenAt(ts))) : ''
-    const name = truncate(chatName(c.jid), Math.max(4, width - 4 - 1 - visibleWidth(when) - 1 - strWidth(eyes) - strWidth(open)))
+    const mood = this.moodOf(c.jid, c.last_ts)
+    const name = truncate(chatName(c.jid), Math.max(4, width - 4 - 1 - visibleWidth(when) - 1 - strWidth(mood) - strWidth(eyes) - strWidth(open)))
     const named = `{${color}-fg}${this.underlineMatches(name)}{/${color}-fg}`
-    const left = `${top} ${c.unread > 0 ? `{bold}${named}{/bold}` : named}${eyes}${dim(open)}`
+    const left = `${top} ${c.unread > 0 ? `{bold}${named}{/bold}` : named}${mood}${eyes}${dim(open)}`
     const first = `${left}${' '.repeat(Math.max(1, width - visibleWidth(left) - visibleWidth(when)))}${when}`
     const count = c.unread > 0 ? t('unreadCount', c.unread) : ''
     const unread = count ? `{${this.green}-fg}{bold}${esc(count)}{/bold}{/${this.green}-fg}` : ''
@@ -2157,6 +2171,17 @@ export class Ui {
     const initials = (words.length ? words.slice(0, 2).map(w => [...w][0]!.toUpperCase()).join('') : '#').padEnd(2)
     const color = colorFor(c.jid)
     return [`{${color}-bg}{bold} ${esc(initials)} {/bold}{/${color}-bg}`, `{${color}-bg}    {/${color}-bg}`]
+  }
+
+  /** The chats' states the server keeps (mood.ts), by chat. */
+  private loadMoods(): Map<string, string> {
+    return new Map(store.listState<Mood>('mood:').map(r => [r.key.slice('mood:'.length), r.value.emoji]))
+  }
+
+  /** A chat's state, " " and its emoji, while its last message (at `lastTs`) is no older than a week; otherwise none. */
+  private moodOf(jid: string, lastTs: number | undefined): string {
+    const emoji = this.moods.get(jid)
+    return emoji && lastTs && Date.now() / 1000 - lastTs <= MOOD_AGE ? ` ${emoji}` : ''
   }
 
   /**
@@ -3695,11 +3720,11 @@ export class Ui {
 
   /**
    * The two rows over the text being written. In a chat, the other side's next message, still to come: a bubble in
-   * their messages' grey with the chat's name in its colour, bold; beside it, as their messages' time, "online" while
-   * they're online (in a group, how many of its members are), or, offline, the time of their last sign. While the
-   * messages above are scrolled up, a faint line on from it, with how many messages are below. Then a row, blank as
-   * between messages, but for dots coming one after another under the name while someone there types. With the chat
-   * list open or a search, a blank row and a faint rule over the line, with the search's count (borderHeader).
+   * their messages' grey with the chat's name in its colour, bold, and its state's emoji (moodOf); beside it, as their messages' time, "online" while they're online (in a group, how
+   * many of its members are), or, offline, the time of their last sign. While the messages above are scrolled up, a
+   * faint line on from it, with how many messages are below. Then a row, blank as between messages, but for dots
+   * coming one after another under the name while someone there types. With the chat list open or a search, a blank
+   * row and a faint rule over the line, with the search's count (borderHeader).
    */
   private drawBorder() {
     const width = num(this.screen.width)
@@ -3724,10 +3749,11 @@ export class Ui {
     const said = online ? (group ? t('onlineCount', online) : t('online')) : seen ? fmtWhenAt(seen) : ''
     const after = said ? ` ${faint(esc(said))}` : ''
     // As their messages: the panel's padding column, then the bubble, a spare column on either side of the text.
-    const room = Math.max(6, width - 4 - visibleWidth(after))
+    const mood = this.moodOf(jid, store.getChat(jid)?.last_ts)
+    const room = Math.max(6, width - 4 - visibleWidth(after) - strWidth(mood))
     const name = truncate(chatName(jid), room)
     const color = colorFor(jid), bg = this.bubbleBg.theirs
-    const text = `{${color}-fg}{bold}${esc(name)}{/bold}{/${color}-fg}`
+    const text = `{${color}-fg}{bold}${esc(name)}{/bold}{/${color}-fg}${mood}`
     this.borderName = { x0: 2, x1: 2 + strWidth(name) }
     const bubble = ` {${bg}-bg} ${text} {/${bg}-bg}${after}`
     // Scrolled up: the bubble isn't the last thing said, and a line on from it says so, with how many are below.
