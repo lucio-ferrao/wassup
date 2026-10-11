@@ -199,6 +199,7 @@ const q = {
     AND EXISTS (SELECT 1 FROM messages n WHERE n.chat_jid = messages.chat_jid AND n.ts > messages.ts)`),
   setType: db.prepare(`UPDATE messages SET type = ?, text = ? WHERE chat_jid = ? AND id = ?`),
   removeMessage: db.prepare(`DELETE FROM messages WHERE chat_jid = ? AND id = ?`),
+  businessChats: db.prepare(`SELECT DISTINCT chat_jid FROM messages WHERE from_me = 0 AND chat_jid NOT LIKE '%@g.us' AND raw LIKE '%"verifiedBizName"%'`),
   removeReactions: db.prepare(`DELETE FROM reactions WHERE chat_jid = ? AND msg_id = ?`),
   lastMessage: db.prepare(`SELECT * FROM messages WHERE chat_jid = ? AND type != 'secretEncrypted' ORDER BY ts DESC LIMIT 1`),
   setReaction: db.prepare(`
@@ -359,6 +360,10 @@ export const store = {
   },
   repairStatuses(): { read: number; groupSent: number } {
     return { read: Number(q.repairRead.run().changes), groupSent: Number(q.repairGroupPending.run().changes) }
+  },
+  /** The one-to-one chats where a message came from a WhatsApp Business account (its verified name in it). */
+  businessChats(): string[] {
+    return (q.businessChats.all() as { chat_jid: string }[]).map(r => r.chat_jid)
   },
   /** A message deleted for me: it goes, and its reactions with it. */
   removeMessage(chat: string, id: string) {

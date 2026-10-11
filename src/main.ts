@@ -38,6 +38,7 @@ class BackendProxy extends EventEmitter<WaEvents> implements Backend {
   ensureMedia(row: MessageRow) { this.inner?.ensureMedia(row) }
   ensurePreview(row: MessageRow) { this.inner?.ensurePreview(row) }
   ensureProfile(jid: string) { this.inner?.ensureProfile(jid) }
+  ensureName(jid: string) { this.inner?.ensureName(jid) }
   downloadAll(jid: string) { return this.ready().downloadAll(jid) }
   async fetchOlder(jid: string) { return this.ready().fetchOlder(jid) }
   async stop() { this.server?.close(); await this.inner?.stop() }

@@ -69,7 +69,17 @@ export function jidUser(jid: string): string {
 /** WhatsApp sends the masked number ("+351∙∙∙∙∙∙∙35") as `name` when the contact isn't saved: that's not a name. */
 const looksLikeNumber = (s: string) => /^[+\d\s∙·.()-]+$/.test(s)
 
+/** My own jid and profile name, as the server keeps them on connecting, read again every 10 s (myself). */
+let mine = { jid: '', name: '', at: 0 }
+function myself() {
+  if (Date.now() - mine.at > 10000) mine = { jid: store.getState<string>('me') ?? '', name: store.getState<string>('meName') ?? '', at: Date.now() }
+  return mine
+}
+
 export function contactName(jid: string): string {
+  // My own chat, with myself: my profile name and "(eu)", where WhatsApp, as for anyone not saved, gives a masked number.
+  const me = myself()
+  if (me.jid && canonicalJid(jid) === me.jid) return me.name ? `${me.name} (${t('me')})` : t('me')
   const c = store.getContact(jid)
   if (c?.name && !looksLikeNumber(c.name)) return c.name
   if (c?.notify) return c.notify
@@ -399,6 +409,11 @@ export class Wa extends EventEmitter<WaEvents> {
     if (fixed.read || fixed.groupSent) logger.info(fixed, 'delivery states repaired')
     const senders = this.repairSenders()
     if (senders) logger.info({ senders }, 'group senders repaired')
+    // Once, the chats already here whose person is a WhatsApp Business account, from the messages that say so.
+    if (!store.getState<boolean>('businessScanned')) {
+      for (const jid of store.businessChats()) store.setState(`biz:${jid}`, true)
+      store.setState('businessScanned', true)
+    }
     await this.connect()
   }
 
@@ -521,6 +536,9 @@ export class Wa extends EventEmitter<WaEvents> {
         this.qr = undefined
         this.me = jidNormalizedUser(sock.user?.id ?? '')
         if (sock.user?.lid) store.setLid(jidNormalizedUser(sock.user.lid), this.me)
+        // Who I am, for every process: my own chat goes by my profile name (contactName).
+        store.setState('me', this.me)
+        if (sock.user?.name) store.setState('meName', sock.user.name)
         // Baileys announces "unavailable" on connect; it's activity in the terminal that sets it back to available.
         this.markAvailable(false)
         // Profiles asked for while it was down are asked now.
@@ -762,6 +780,8 @@ export class Wa extends EventEmitter<WaEvents> {
     store.upsertMessage(row)
     store.touchChat(p.chatJid, this.isGroup(p.chatJid), p.ts)
     if (p.pushName && !p.fromMe) store.upsertContact(p.senderJid, null, p.pushName)
+    // A message from a WhatsApp Business account carries its verified name: the chat's number is a business one.
+    if (m.verifiedBizName && !p.fromMe && !this.isGroup(p.chatJid) && !store.getState<boolean>(`biz:${p.chatJid}`)) store.setState(`biz:${p.chatJid}`, true)
     if (p.thumb && p.thumb.length > 0) {
       const tp = thumbPath(p.chatJid, p.id)
       if (!fs.existsSync(tp)) {
@@ -987,10 +1007,31 @@ export class Wa extends EventEmitter<WaEvents> {
    * Notifies via 'messages' when done either way.
    */
   /**
-   * A chat's picture, "about" and, for a group, how many members it has, asked of WhatsApp for the chat list at most
-   * once a day, one chat at a time; the picture, whole (shown small in the list and large when clicked), goes to the
-   * chat's media folder. A picture or "about"
-   * hidden by privacy, or missing, is stored as none; a request that fails is tried again the next day.
+   * A one-to-one chat whose person has no name here, neither in the address book nor as a profile name (only their
+   * number, or the masked one WhatsApp gives for someone not saved): its latest messages are asked of the phone again,
+   * at most once a day, as its copy may carry the profile name the messages as they came didn't. What comes is stored
+   * as any history is, the profile name going to the contact (storeMessage).
+   */
+  ensureName(jid: string) {
+    const sock = this.sock
+    if (!sock || this.state !== 'open' || this.isGroup(jid)) return
+    const c = store.getContact(jid)
+    if (c?.notify || (c?.name && !looksLikeNumber(c.name))) return
+    const asked = `nameAsked:${jid}`
+    if (Date.now() - (store.getState<number>(asked) ?? 0) < 86400_000) return
+    const newest = store.listMessages(jid, 1)[0]
+    if (!newest) return
+    store.setState(asked, Date.now())
+    const { key } = JSON.parse(newest.raw, BufferJSON.reviver) as WAMessage
+    sock.fetchMessageHistory(50, { remoteJid: key.remoteJid, fromMe: key.fromMe, id: key.id }, newest.ts)
+      .catch(e => logger.warn({ e: String(e), jid }, 'ensureName'))
+  }
+
+  /**
+   * A chat's picture, "about" and, for a group, how many members it has (for a person, whether the number is a
+   * WhatsApp Business account), asked of WhatsApp for the chat list at most once a day, one chat at a time; the
+   * picture, whole (shown small in the list and large when clicked), goes to the chat's media folder. A picture or
+   * "about" hidden by privacy, or missing, is stored as none; a request that fails is tried again the next day.
    */
   ensureProfile(jid: string) {
     const known = store.getProfile(jid)
@@ -1009,7 +1050,12 @@ export class Wa extends EventEmitter<WaEvents> {
     try {
       let about: string | null = null, members: number | null = null, avatar = ''
       if (jid.endsWith('@g.us')) members = (await sock.groupMetadata(jid)).participants.length
-      else about = ((await sock.fetchStatus(jid))?.[0] as { status?: { status?: string | null } } | undefined)?.status?.status?.trim() || null
+      else {
+        about = ((await sock.fetchStatus(jid))?.[0] as { status?: { status?: string | null } } | undefined)?.status?.status?.trim() || null
+        // Whether the number is a WhatsApp Business account: it has a business profile.
+        const business = await sock.getBusinessProfile(jid).then(b => !!b, () => undefined)
+        if (business !== undefined) store.setState(`biz:${jid}`, business)
+      }
       const url = await sock.profilePictureUrl(jid, 'image').catch(() => undefined)
       if (url) {
         const res = await fetch(url)

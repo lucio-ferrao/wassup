@@ -29,6 +29,8 @@ export interface Backend extends EventEmitter<WaEvents> {
   ensurePreview(row: MessageRow): void
   /** Asks WhatsApp for a chat's picture, "about" and group size, at most once a day (see Wa.ensureProfile). */
   ensureProfile(jid: string): void
+  /** Asks the phone again for a chat's latest messages when its person has no name here (see Wa.ensureName). */
+  ensureName(jid: string): void
   downloadAll(chatJid: string): Promise<{ copied: number; pending: number }>
   /** Asks the phone for messages older than the oldest stored for this chat; resolves with how many came, 0 for none. */
   fetchOlder(chatJid: string): Promise<number>
