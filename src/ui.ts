@@ -12,7 +12,7 @@ import { waMarkup, clipTagged, esc, colorFor, setTheme, dim, faint, italic, padd
 import { decode, cached, decodeThumb, thumbCached, cellSize, halfBlocks, blockGrid, blockCell, detectImageMode, detectRgb, KittyImages, RgbPainter, type BlockGrid, type Decoded, type ImageMode, type RgbCell } from './image.js'
 import { logger, uiLog } from './log.js'
 import { linksIn, showLinks, URL_RE } from './links.js'
-import { patchBlessedDraw, patchBlessedUnicode } from './unicode.js'
+import { patchBlessedDraw, patchBlessedUnicode, tameEmoji } from './unicode.js'
 import type { TermCaps } from './term.js'
 import { emojify, emoticonify, completeEmoji, emoticonAt } from './emoji.js'
 import { enableKittyKeyboard } from './kittykeys.js'
@@ -3106,8 +3106,9 @@ export class Ui {
       const y = real - this.msgBox.childBase
       if (y < 0 || y >= this.innerHeight()) return null
       const line = (this.msgBox._clines[real] ?? '').replace(/\x1b\[[\d;]*m/g, '')
-      // The emoji as shown, or the text as received (a smiley like "<3" that stands for it).
-      const at = [emoji, text.trim()].map(s => line.indexOf(s)).find(i => i >= 0)
+      // The emoji as shown (without its skin tone, the first of a joined sequence, a flag as letters: tameEmoji), or
+      // the text as received (a smiley like "<3" that stands for it).
+      const at = [emoji, tameEmoji(emoji), text.trim()].map(s => line.indexOf(s)).find(i => i >= 0)
       if (at == null) return null
       return { x: num(this.msgBox.aleft) + num(this.msgBox.ileft) + strWidth(line.slice(0, at)), y: num(this.msgBox.atop) + num(this.msgBox.itop) + y }
     })
