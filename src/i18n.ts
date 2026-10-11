@@ -90,7 +90,6 @@ const STRINGS = {
   messageNotFound: { pt: 'mensagem não encontrada', en: 'message not found' },
   loadingOlder: { pt: 'a carregar mensagens anteriores…', en: 'loading earlier messages…' },
   search: { pt: 'procurar', en: 'search' },
-  chatsTab: { pt: 'conversas', en: 'chats' },
   searchHeader: { pt: '{0} de {1} · ↑ mais antiga, ↓ mais recente · Enter fica nela · Esc fecha', en: '{0} of {1} · ↑ older, ↓ newer · Enter stays on it · Esc closes' },
   searchNone: { pt: 'sem resultados', en: 'no results' },
 } as const

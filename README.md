@@ -62,18 +62,19 @@ light or dark shades.
   day being its separator's (with a filter, which has no separators, the day too: `ontem 21:35`, `12 set 21:35`), in
   the column your messages' times end in. On the second, under the name, the person's number (without the country code
   when it's the same as mine, and 💼 after it for a WhatsApp Business account, known from its messages or its business
-  profile) or a group's number of members. The selected chat is on the green of the band where you write, as the
-  active tab is, up to its time, which stays out flush right, as a message's does. Your chat with yourself goes by
-  your profile name and "(eu)", where WhatsApp gives only a masked number. Photos, "abouts" and group sizes are asked
-  of WhatsApp for the chats in view, at most once a day, and kept; a chat opened whose person has no name here (only
-  the number, or the masked one WhatsApp gives for someone not saved) has its latest messages asked of the phone
-  again, at most once a day, as its copy may carry the profile name; a click on a photo opens it large, with its
-  description, as images do. What's typed in the band, with the list's own tab, `conversas`, active under it, filters
-  it word by word, ignoring accents and case, with the matches underlined; Enter, Tab, → or a click opens. Ctrl+F
-  there searches the messages of every chat instead (the tab says `procurar`; again or Esc back to the names): from
-  two characters on, the list holds those that have all the words, the most recent at the bottom, each as its chat,
-  who wrote it and when, and two lines of its text from a little before the match, the matches in reverse video; Enter
-  or a click opens the chat on that message.
+  profile) or a group's number of members. The selected chat is on the green of the band where you write, as the active
+  tab is, up to its time, which stays out flush right, as a message's does. Back within 30 seconds, the list opens on
+  the chat you were in, selected; otherwise none is, till the first ↑ or ↓ selects the most recent, or a filter its best
+  match, and till then Enter, Tab and → open nothing. Your chat with yourself goes by your profile name and "(eu)",
+  where WhatsApp gives only a masked number. Photos, "abouts" and group sizes are asked of WhatsApp for the chats in
+  view, at most once a day, and kept; a chat opened whose person has no name here (only the number, or the masked one
+  WhatsApp gives for someone not saved) has its latest messages asked of the phone again, at most once a day, as its
+  copy may carry the profile name; a click on a photo opens it large, with its description, as images do. What's typed
+  in the band, with the list's own tab, `wassup`, active under it, filters it word by word, ignoring accents and
+  case, with the matches underlined; Enter, Tab, → or a click opens. Ctrl+F there searches the messages of every chat
+  instead (the tab says `procurar`; again or Esc back to the names): from two characters on, the list holds those that
+  have all the words, the most recent at the bottom, each as its chat, who wrote it and when, and two lines of its text
+  from a little before the match, the matches in reverse video; Enter or a click opens the chat on that message.
 - **Messages**: yours on the right, each in a bubble with WhatsApp Web's colours where the terminal takes 24-bit
   colour (yours, on a dark theme, toned down to the brightness of theirs) and two discreet greys otherwise, with the
   time outside it, yours with their state in its separator (`14 06` not sent yet, `14.06` sent, `14:06` delivered;

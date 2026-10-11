@@ -321,6 +321,13 @@ export class Ui {
   private pickerWords: string[] = []
   /** The row selected before, to know which way the selection was going when it lands on a separator. */
   private pickerAt = -1
+  /**
+   * Whether the list's selection shows without a filter or a search: the list opens on the chat you were in, back
+   * within 30 s, or once the keys move it. Otherwise no chat shows as selected until a filter or a search picks one
+   * (pickerChosen), and Enter, Tab and → open nothing.
+   */
+  private pickerPicked = false
+  private get pickerChosen(): boolean { return this.pickerPicked || !!this.filter || this.pickerSearch }
   /** The chat to select when the list opens (openPicker): the one in front, or null for the most recent. */
   private pickerFocus: string | null | undefined
   /** When the list was last closed, and the chat selected then with its row on the screen (from the list's top). */
@@ -542,13 +549,22 @@ export class Ui {
       // The selected chat is marked as the active tab is, bold and in the theme's strongest color, on my bubbles' green
       // up to its time, which stays out as a message's does (selectedRow, litRow; repainted in WhatsApp Web's colour
       // where the terminal takes 24-bit colour).
-      style: { selected: { bold: true, fg: this.dark ? 'bright-white' : 'black' } } as unknown as blessed.Widgets.ListElementStyle,
+      // With no chat chosen yet (pickerChosen), the selected row looks as the others do.
+      style: {
+        selected: { bold: () => this.pickerChosen, fg: () => (this.pickerChosen ? (this.dark ? 'bright-white' : 'black') : undefined) },
+      } as unknown as blessed.Widgets.ListElementStyle,
     })
     // Rows aren't wrapped, as the messages' aren't: a row is one line, cut at the edge should it ever run past it.
     // Set as each row is made, before blessed first lays out its content.
     const list = this.picker as unknown as { createItem: (content: string) => { wrap: boolean } }
     const createItem = list.createItem.bind(list)
     list.createItem = content => { const item = createItem(content); item.wrap = false; return item }
+    // With no chat chosen, the keys' first move (↑/↓, PgUp/PgDn) shows the selection where it already is, on the most
+    // recent chat; only the next ones move it. Enter opens nothing before.
+    const keyed = this.picker as unknown as { move: (n: number) => void; enterSelected: () => void }
+    const move = keyed.move.bind(keyed), enterSelected = keyed.enterSelected.bind(keyed)
+    keyed.move = n => { if (this.pickerChosen) return move(n); this.pickerPicked = true; this.lightPickerRows(this.pickerAt) }
+    keyed.enterSelected = () => { if (this.pickerChosen) enterSelected() }
     this.pickerHead = blessed.box({ parent: this.screen, top: 0, left: 0, right: 0, height: 1, padding: { left: 1 }, tags: true, wrap: false, hidden: true })
     // Floating over the messages (status at the top right); created last so it stays on top.
     this.toast = blessed.box({ parent: this.screen, top: 0, left: 0, width: 1, height: 1, tags: true, hidden: true })
@@ -1051,7 +1067,8 @@ export class Ui {
     if (this.sentFix) this.hideSentFix()
     if (this.search) return this.searchKey(k, ch, key)
     if (k === 'C-f' && this.current && !this.pickerOpen) return this.openSearch()
-    if (k === 'C-f' && this.pickerOpen) { this.pickerSearch = !this.pickerSearch; this.refreshPicker(); return this.screen.render() }
+    // The list's tab says which: "wassup" for the names, "procurar" for the messages.
+    if (k === 'C-f' && this.pickerOpen) { this.pickerSearch = !this.pickerSearch; this.dirtyTabs = true; this.refreshPicker(); return this.renderNow() }
     if (k === 'paste') return this.paste(ch)
     // ESC closes, in order: the reply or reaction in progress, the selection, the picker filter, the picker, the
     // active tab, the program.
@@ -1063,7 +1080,7 @@ export class Ui {
       if (this.editing) { this.editing = null; this.inputValue = ''; this.cursor = 0; this.updateSuggestions(); this.drawInput(); return this.screen.render() }
       if (this.focus === 'messages') { this.setFocus('input'); return this.renderNow() }
       if (this.pickerOpen) {
-        if (this.pickerSearch) { this.pickerSearch = false; this.filter = ''; this.filterCursor = 0; this.refreshPicker(); return this.screen.render() }
+        if (this.pickerSearch) { this.pickerSearch = false; this.dirtyTabs = true; this.filter = ''; this.filterCursor = 0; this.refreshPicker(); return this.renderNow() }
         if (this.filter) { this.filter = ''; this.filterCursor = 0; this.refreshPicker(); return this.screen.render() }
         // With no tabs there's nowhere to go back to: the picker is the only panel, and closing it means quitting.
         return this.tabs.length ? this.closePicker() : this.quit()
@@ -1100,6 +1117,7 @@ export class Ui {
     // In the chat list: Enter (below, from the list) opens the chat; → (at the end of the filter) and Tab do the
     // same, except in Herdr, where Enter puts it in this pane, → opens it in a new pane and Tab in a new tab.
     if (this.pickerOpen && (k === 'tab' || (k === 'right' && this.filterCursor >= graphemes(this.filter).length))) {
+      if (!this.pickerChosen) return
       return this.pickChat((this.picker as unknown as { selected: number }).selected, !inHerdr ? 'here' : k === 'tab' ? 'tab' : 'pane')
     }
     if (k === 'tab') {
@@ -1787,8 +1805,8 @@ export class Ui {
     this.dirtyMessages = true
     this.lineMap = []; this.images = []; this.rows = []; this.selected = null
     this.saveTabs()
-    // Closing the last tab goes back to the chat list, where Esc, with no tab left, quits.
-    if (!this.tabs.length) return this.openPicker()
+    // Closing the last tab goes back to the chat list, on the chat closed, where Esc, with no tab left, quits.
+    if (!this.tabs.length) return this.openPicker('', closing)
     // The prompt takes the name of the chat now in front.
     this.drawInput()
     this.renderNow()
@@ -1801,7 +1819,7 @@ export class Ui {
    * name and its state's emoji (moodOf), or in its place two emoji taking turns while someone types there, and the
    * unread count in red. The active one on my bubbles' green, as the band it's the label of, its name in its colour,
    * bold; the others on the other side's grey, quieter. No × to close: Esc closes the active one. With the chat list
-   * open, its own tab comes first and is the active one, "conversas" (or "procurar", searching them all). Names
+   * open, its own tab comes first and is the active one, "wassup" (or "procurar", searching them all). Names
    * shorten for the tabs to fit, down to 6 characters. Against the right edge, a passing message or the connection's
    * state when it needs attention.
    */
@@ -1816,7 +1834,7 @@ export class Ui {
       return { jid, i, name: chatName(jid), mood, badge: chat?.unread ? `(${chat.unread})` : '' }
     })
     // With the chat list open, its own tab comes first, active: the band is its filter's.
-    const own = this.pickerOpen ? t(this.pickerSearch ? 'search' : 'chatsTab') : ''
+    const own = this.pickerOpen ? (this.pickerSearch ? t('search') : APP) : ''
     const ownW = own ? strWidth(own) + 3 : 0
     // Each tab: a cell either side of its text, and a cell between tabs; the first starts where the band does.
     // Each one's photo, before its name, once it has one (its cells kept while it's decoded, so nothing moves).
@@ -1925,7 +1943,8 @@ export class Ui {
 
   // ---------- picker ----------
 
-  private openPicker(filter = '') {
+  /** The chat list, with `filter` typed in it; `from`, the chat you come from, if not the one in front (closeTab). */
+  private openPicker(filter = '', from = this.current) {
     this.pickerSearch = false
     this.filter = filter
     this.filterCursor = graphemes(filter).length
@@ -1934,12 +1953,13 @@ export class Ui {
     this.picker.show()
     this.pickerHead.show()
     this.msgBox.hide()
-    // Back within 30 s of leaving it, the list opens on the chat in front of you, selected and in view however far up
-    // it is, on the same row of the screen when it's the one it was left on; later, on the most recent ones, at the
-    // bottom.
+    // Back within 30 s of leaving it, the list opens on the chat you come from, selected and in view however far up it
+    // is, on the same row of the screen when it's the one it was left on; later, on the most recent ones, at the
+    // bottom, none selected till the keys move the selection (pickerChosen).
     const back = Date.now() - this.pickerClosedAt < 30000
-    this.pickerFocus = back ? this.current : null
-    this.pickerFocusRow = back && this.current && this.pickerLeft?.jid === this.current ? this.pickerLeft.row : undefined
+    this.pickerPicked = back && !!from
+    this.pickerFocus = back ? from : null
+    this.pickerFocusRow = back && from && this.pickerLeft?.jid === from ? this.pickerLeft.row : undefined
     this.refreshPicker()
     this.setFocus('picker')
     this.renderNow()
@@ -2143,15 +2163,20 @@ export class Ui {
     this.picker.top = head + gap
     this.picker.height = Math.max(1, room - gap)
     this.drawPickerHead(big)
-    const want = this.pickerFocus !== undefined ? this.pickerFocus : sameFilter ? selectedJid : null
+    const focusing = this.pickerFocus !== undefined
+    const want = focusing ? this.pickerFocus : sameFilter ? selectedJid : null
     this.pickerFocus = undefined
     const keep = selectedHit && sameFilter ? [...this.pickerHits].find(([, m]) => m.id === selectedHit)?.[0] ?? -1
       : want ? slots.findIndex((c, i) => c?.jid === want && !this.pickerHits.has(i)) : -1
+    // The chat you came back from, should it not be in the list, leaves the most recent unselected.
+    if (focusing && keep < 0) this.pickerPicked = false
     // By default the last row that can be selected: a message found ends in rows of its text.
     let last = slots.length - 1
     while (last > 0 && !slots[last]) last--
     this.pickerAt = keep >= 0 ? keep : Math.max(0, last)
+    // Lit here too: blessed says nothing when the selection stays on the same row, the rows anew all the same.
     this.picker.select(this.pickerAt)
+    this.lightPickerRows(this.pickerAt)
     // The chat goes back to the row of the screen it was on, as far as the list's ends allow.
     const visible = num(this.picker.height) - num(this.picker.iheight)
     if (this.pickerFocusRow !== undefined && keep >= 0) {
@@ -2281,9 +2306,10 @@ export class Ui {
     const strip = (s: string) => s.replace(/\{\/?\d+-fg\}/g, '')
     const head = this.pickerHeads.get(i)
     if (!head) return strip(this.pickerItems[i] ?? '')
-    // The green opened again after the photo's half-blocks, which end in a full reset, and closed before the time.
+    // The green opened again after the photo, whose half-blocks end in a full reset and whose initials' colour ends in
+    // the default background, and closed before the time.
     const on = `\x1b[48;5;${this.bubbleBg.mine}m`
-    return `${on}${strip(head[0]).replace(/\x1b\[0m/g, `\x1b[0m${on}`)}\x1b[49m${head[1]}`
+    return `${on}${strip(head[0]).replace(/\x1b\[0m|\{\/\d+-bg\}/g, m => `${m}${on}`)}\x1b[49m${head[1]}`
   }
 
   /**
@@ -2294,18 +2320,21 @@ export class Ui {
     return width - this.pickerTimeCols - 1
   }
 
-  /** The rows that continue the one selected get its background; those that had it go back to their own look. */
+  /**
+   * The rows that continue the one selected get its background; those that had it go back to their own look. With no
+   * chat chosen yet (pickerChosen), none has it.
+   */
   private lightPickerRows(i: number) {
     for (const j of this.pickerLit) this.picker.setItem(j as unknown as blessed.Widgets.BlessedElement, this.pickerItems[j] ?? '')
-    this.pickerLit = [i]
-    this.picker.setItem(i as unknown as blessed.Widgets.BlessedElement, this.selectedRow(i))
-    for (let j = i + 1; this.pickerCont.get(j) === i; j++) {
-      this.picker.setItem(j as unknown as blessed.Widgets.BlessedElement, this.litRow(j))
-      this.pickerLit.push(j)
-    }
+    // A list with nothing in it (a search yet to find anything) has no row to light.
+    if (!this.pickerSlots[i]) { this.pickerLit = []; return }
+    const own = [i]
+    for (let j = i + 1; this.pickerCont.get(j) === i; j++) own.push(j)
+    this.pickerLit = this.pickerChosen ? own : []
+    for (const j of this.pickerLit) this.picker.setItem(j as unknown as blessed.Widgets.BlessedElement, j === i ? this.selectedRow(i) : this.litRow(j))
     // Its rows stay in view with it: blessed only keeps the selected one, which at the bottom left them out.
     const list = this.picker as unknown as { childBase: number; childOffset: number }
-    const rows = num(this.picker.height) - num(this.picker.iheight), last = this.pickerLit.at(-1)!
+    const rows = num(this.picker.height) - num(this.picker.iheight), last = own.at(-1)!
     if (last >= list.childBase + rows) { list.childBase = last - rows + 1; list.childOffset = i - list.childBase }
   }
 
@@ -2842,7 +2871,7 @@ export class Ui {
     // In a chat the text is written as my next message, on my bubbles' green, in a band as wide as my bubbles can be,
     // two rows at least, growing upwards with the text, wrapped by word (never mid-word), the chat's tab, with its
     // name, right under it (drawTabs); what's being replied to, reacted to or edited on a row of its own at its top.
-    // The chat list's filter is written in the same band, its tab "conversas" (or "procurar", searching them all).
+    // The chat list's filter is written in the same band, its tab "wassup" (or "procurar", searching them all).
     // When the text has more lines than fit, the ones around the cursor are shown, with the cursor on the bottom one
     // whenever possible. While the messages are scrolled up, "↓" and how many are below, beside the band where the
     // time goes. Searching the chat (Ctrl+F), the line is the search's, plain, after "procurar ❯", under a faint rule
