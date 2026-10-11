@@ -18,6 +18,7 @@ import { emojify, emoticonify, completeEmoji, emoticonAt } from './emoji.js'
 import { enableKittyKeyboard } from './kittykeys.js'
 import { enableBracketedPaste } from './paste.js'
 import { Hearts, reaction, emojiOnly } from './hearts.js'
+import { bigText } from './bigtext.js'
 import { t } from './i18n.js'
 import { parseHex, mix, nearest256, type Rgb } from './rainbow.js'
 import { suggest, describe, llmEnabled, type Suggestion, type Fix } from './llm.js'
@@ -195,6 +196,9 @@ export class Ui {
   private screen: blessed.Widgets.Screen
   private tabsBar: blessed.Widgets.BoxElement
   private msgBox: ClinesBox
+  /** The open chat's name over its messages (drawChatHead), and the rows it takes, which the messages start under. */
+  private chatHead!: blessed.Widgets.BoxElement
+  private headRows = 0
   private input: blessed.Widgets.BoxElement
   private picker: blessed.Widgets.ListElement
   /** Notice of a new message in another chat: a line with a background, sitting over its tab in the bar. */
@@ -520,8 +524,9 @@ export class Ui {
     this.disablePaste = enableBracketedPaste((this.screen.program as unknown as { input: Parameters<typeof enableBracketedPaste>[0] }).input, s => program._write(s))
     logger.info({ caps, images: this.mode, dark: this.dark, term: process.env.TERM }, 'terminal')
 
-    // Layout: messages at full width, and under them, as my next message, the text being written on my bubbles' green,
-    // growing upwards with it; under that, the tab bar, with the status on the right.
+    // Layout: the chat's name at the top (drawChatHead), messages at full width under it, and under them, as my next
+    // message, the text being written on my bubbles' green, growing upwards with it; under that, the tab bar, with
+    // the status on the right.
     this.tabsBar = blessed.box({
       parent: this.screen, top: '100%-1', left: 0, width: '100%', height: 1, tags: true, mouse: true,
     })
@@ -531,6 +536,7 @@ export class Ui {
       // one unit too long); left to itself it would still cut a line that reaches the edge at its last word.
       tags: true, wrap: false, scrollable: true, alwaysScroll: true, mouse: true,
     }) as ClinesBox
+    this.chatHead = blessed.box({ parent: this.screen, top: 0, left: 0, right: 0, height: 1, padding: { left: 1 }, tags: true, wrap: false, hidden: true })
     this.input = blessed.box({
       parent: this.screen, top: `100%-${this.inputRows + 1}`, left: 0, right: 0, height: this.inputRows,
       // Each line is laid out to its width already, the bubble's to the end: blessed is left to wrap nothing.
@@ -2456,6 +2462,7 @@ export class Ui {
   }
 
   private renderNow() {
+    this.drawChatHead()
     if (this.dirtyTabs) { this.dirtyTabs = false; this.drawTabs(); this.updateTitle() }
     if (this.dirtyMessages && !this.showingQr) { this.dirtyMessages = false; if (this.current) this.renderMessages() }
     // With no chat open (startup without one asked for, or chats arriving for the first time, after the QR) the
@@ -2463,6 +2470,30 @@ export class Ui {
     if (!this.current && !this.pickerOpen && !this.showingQr && store.listChats().some(c => !c.archived)) return this.openPicker()
     if (this.viewing) this.drawViewer()
     this.screen.render()
+  }
+
+  /**
+   * The open chat's name at the top of the screen, over its messages, big (bigText) in the colour it has in groups,
+   * as the app's name is over the chat list; on one line, bold, where not even its first word fits, without a UTF-8
+   * locale, or on a screen under 16 rows. None with the chat list open or the QR in view. The messages start under it.
+   */
+  private drawChatHead() {
+    const jid = this.pickerOpen || this.showingQr ? undefined : this.current
+    let rows = 0
+    if (jid) {
+      const name = chatName(jid), color = colorFor(jid), width = num(this.screen.width) - 2
+      const big = this.ruleChar === '─' && num(this.screen.height) >= 16 ? bigText(name, width) : null
+      const lines = big ? big.map(l => `{${color}-fg}${esc(l)}{/${color}-fg}`) : [`{${color}-fg}{bold}${esc(truncate(name, width))}{/bold}{/${color}-fg}`]
+      this.chatHead.setContent(lines.join('\n'))
+      rows = lines.length
+    }
+    if (rows) this.chatHead.show(); else this.chatHead.hide()
+    if (rows === this.headRows) return
+    this.headRows = rows
+    this.chatHead.height = Math.max(1, rows)
+    this.msgBox.top = rows
+    this.msgBox.height = `100%-${this.bottom + rows}`
+    this.dirtyMessages = true
   }
 
   // Window title: the active chat, with two emoji taking turns in front while someone types (typingEmoji), or else a
@@ -3121,7 +3152,7 @@ export class Ui {
     this.laidBottom = this.bottom
     this.input.top = `100%-${rows + 1}`
     this.ruleTop.top = `100%-${rows + 2}`
-    this.msgBox.height = `100%-${this.bottom}`
+    this.msgBox.height = `100%-${this.bottom + this.headRows}`
     this.picker.height = `100%-${this.bottom + 1}`
     this.dirtyMessages = true
     this.dirtyTabs = true

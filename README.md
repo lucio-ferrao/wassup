@@ -37,13 +37,15 @@ texts, the emoji names and the language of the writing suggestions.
 
 ## Interface
 
-Messages across the full width, and under them, as your next message, the text being written on your bubbles' green,
-in a band as wide as your bubbles can be, growing upwards with the text; while the messages are scrolled up, `↓` and
-how many are below sit beside the band, where the time goes, and a click on them goes down to the latest. When it's
-sent, the conversation first moves up to make room for it, and then the band narrows to the bubble and rises into that
-room. Under the band, the tab bar, with the connection state on the right. Beyond the bubbles, no backgrounds of its
-own: the colours are the terminal theme's, and on startup the terminal is asked for its real background colour to pick
-light or dark shades.
+The chat's name at the top, big, drawn in the rounded lines of the `wassup` over the chat list, in lowercase and in the
+colour the chat has in groups (only the words that fit; on one line, bold, with no room or no UTF-8 locale). Messages
+across the full width under it, and under them, as your next message, the text being written on your bubbles' green, in
+a band as wide as your bubbles can be, growing upwards with the text; while the messages are scrolled up, `↓` and how
+many are below sit beside the band, where the time goes, and a click on them goes down to the latest. When it's sent,
+the conversation first moves up to make room for it, and then the band narrows to the bubble and rises into that room.
+Under the band, the tab bar, with the connection state on the right. Beyond the bubbles, no backgrounds of its own: the
+colours are the terminal theme's, and on startup the terminal is asked for its real background colour to pick light or
+dark shades.
 
 - **Tabs**: one per open chat, under the band where you write: the chat's photo (two cells by one, real pixels with
   Kitty, half-blocks otherwise; a click on it opens it large), its name and its state's emoji (see Writing
