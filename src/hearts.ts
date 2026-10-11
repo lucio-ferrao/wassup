@@ -93,6 +93,22 @@ function rasterize(emoji: string): Promise<void> {
   loading.set(emoji, job)
   return job
 }
+/**
+ * The emoji as a square PNG, its glyph centred on a transparent ground with a little room around it, for Kitty's
+ * graphics (ui.ts draws emoji on their own twice their size with it): null when it can't be drawn.
+ */
+export async function emojiPng(emoji: string): Promise<{ png: Buffer; size: number } | null> {
+  if (!glyphs.has(emoji)) await rasterize(emoji)
+  const g = glyphs.get(emoji), sharp = await loadSharp()
+  if (!g || !sharp) return null
+  const size = Math.round(Math.max(g.w, g.h) * 1.08)
+  const x = Math.floor((size - g.w) / 2), y = Math.floor((size - g.h) / 2)
+  const png = await sharp(Buffer.from(g.rgba.buffer, g.rgba.byteOffset, g.rgba.byteLength), { raw: { width: g.w, height: g.h, channels: 4 } })
+    .extend({ left: x, right: size - g.w - x, top: y, bottom: size - g.h - y, background: { r: 0, g: 0, b: 0, alpha: 0 } })
+    .png().toBuffer()
+  return { png, size }
+}
+
 /** The glyph cut down to the box of its ink (alpha above a hair), or null if it drew nothing. */
 function trim(rgba: Uint8Array, w: number, h: number): Glyph | null {
   let x0 = w, y0 = h, x1 = -1, y1 = -1

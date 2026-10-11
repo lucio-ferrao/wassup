@@ -77,25 +77,27 @@ dark shades.
   instead (the tab says `procurar`; again or Esc back to the names): from two characters on, the list holds those that
   have all the words, the most recent at the bottom, each as its chat, who wrote it and when, and two lines of its text
   from a little before the match, the matches in reverse video; Enter or a click opens the chat on that message.
-- **Messages**: yours on the right, each in a bubble with WhatsApp Web's colours where the terminal takes 24-bit
-  colour (yours, on a dark theme, toned down to the brightness of theirs) and two discreet greys otherwise, with the
-  time outside it, yours with their state in its separator (`14 06` not sent yet, `14.06` sent, `14:06` delivered;
-  `14:06❮` the last of yours that was read) and a link's preview image inside it above the text; the pictures of
-  images, stickers, videos and GIFs stay out of it, with their caption in it, and emoji on their own go bare; each day
-  starts with a separator and a blank line. Mouse wheel or PgUp/PgDn; scrolling past the top brings older messages,
-  first the stored ones and then from the phone, and Ctrl+↓ or Ctrl+PgDn goes back to the latest. An attachment not
-  downloaded yet shows `⤓`: a click fetches it into the app's media folder, where it stays, and the mark goes; once
-  there, a click opens it with `xdg-open` (`open` on macOS), except images and stickers, which open in a popup in the
-  client, as large as it fits, with the local model's description under them, as do link previews; any key or click
-  closes it. ↑ selects a message: typing replies to it, `:` reacts (erasing what was typed, down to nothing, drops the
-  reply or the reaction), Backspace opens one of yours for editing, and Delete or Ctrl+D deletes it once pressed again
-  (the band says how): yours for everyone, as the phone does, for two days after it was sent, and any other only for
-  you. Mentions show the person's first name in their colour (`@Ana`); a click on one, or in a group on a member's
-  name, opens the chat with them; a click on a pin (`📌 pinned a message`) goes to the message it's about. The `☺` next
-  to a message under the pointer opens its quick reactions; a double click, dragging it to the right, or → with it
-  selected, starts a reply. Ctrl+F searches the open chat's whole history, accents and case aside: the input becomes
-  `procurar ❯`, the matches are shown in reverse video and the most recent one selected, ↑ goes to an older one and ↓
-  to a newer one, with a count on the rule above the input; Enter stays on it, Esc closes.
+- **Messages**: yours on the right, each in a bubble with WhatsApp Web's colours where the terminal takes 24-bit colour
+  (yours, on a dark theme, toned down to the brightness of theirs) and two discreet greys otherwise, with the time
+  outside it, yours with their state in its separator (`14 06` not sent yet, `14.06` sent, `14:06` delivered; `14:06❮`
+  the last of yours that was read) and a link's preview image inside it above the text; the pictures of images,
+  stickers, videos and GIFs stay out of it, with their caption in it, and emoji on their own go bare (one to three of
+  them twice their size, two lines tall and on the terminal's background: drawn by the terminal itself where it draws
+  text bigger, as Kitty does, asked on startup, or else in pictures where it shows Kitty's graphics, as Ghostty does);
+  each day starts with a separator and a blank line. Mouse wheel or PgUp/PgDn; scrolling past the top brings older
+  messages, first the stored ones and then from the phone, and Ctrl+↓ or Ctrl+PgDn goes back to the latest. An
+  attachment not downloaded yet shows `⤓`: a click fetches it into the app's media folder, where it stays, and the mark
+  goes; once there, a click opens it with `xdg-open` (`open` on macOS), except images and stickers, which open in a
+  popup in the client, as large as it fits, with the local model's description under them, as do link previews; any key
+  or click closes it. ↑ selects a message: typing replies to it, `:` reacts (erasing what was typed, down to nothing,
+  drops the reply or the reaction), Backspace opens one of yours for editing, and Delete or Ctrl+D deletes it once
+  pressed again (the band says how): yours for everyone, as the phone does, for two days after it was sent, and any
+  other only for you. Mentions show the person's first name in their colour (`@Ana`); a click on one, or in a group on a
+  member's name, opens the chat with them; a click on a pin (`📌 pinned a message`) goes to the message it's about. The
+  `☺` next to a message under the pointer opens its quick reactions; a double click, dragging it to the right, or → with
+  it selected, starts a reply. Ctrl+F searches the open chat's whole history, accents and case aside: the input becomes
+  `procurar ❯`, the matches are shown in reverse video and the most recent one selected, ↑ goes to an older one and ↓ to
+  a newer one, with a count on the rule above the input; Enter stays on it, Esc closes.
 - **Input**: grows with the text up to half the screen; what's being replied to, reacted to or edited shows on the
   band's first row; Enter sends, Shift+Enter or Ctrl+J start a new line, and pasting several lines keeps them. Ctrl-U
   clears, Shift-Backspace deletes a word (with the Kitty keyboard protocol). `:` and a letter open the emoji list;

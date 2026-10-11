@@ -26,6 +26,8 @@ export interface TermCaps {
   truecolor: boolean
   /** Columns the terminal gives a flag (🇵🇹), measured by writing one and asking where the cursor went; null if it didn't say. */
   flagWidth: number | null
+  /** Text drawn bigger by the terminal itself (Kitty's text sizing protocol, OSC 66): a space at twice the size took two cells. */
+  textSizing: boolean
 }
 
 const DA1_RE = /\x1b\[\?[\d;]*c/
@@ -97,7 +99,7 @@ function ask(query: string, timeoutMs: number): Promise<string> {
 }
 
 export async function probeTerminal(timeoutMs = 600): Promise<TermCaps> {
-  const caps: TermCaps = { kittyGraphics: false, utf8: localeIsUtf8(), answersQueries: false, version: null, kittyKeyboard: false, fg: null, bg: null, truecolor: false, flagWidth: null }
+  const caps: TermCaps = { kittyGraphics: false, utf8: localeIsUtf8(), answersQueries: false, version: null, kittyKeyboard: false, fg: null, bg: null, truecolor: false, flagWidth: null, textSizing: false }
   if (!process.stdin.isTTY || !process.stdout.isTTY) return caps
   // The questions are asked on the alternate screen, left as soon as they're answered: a terminal that doesn't know
   // one may print it as text (Termius prints the DCS ones, "+q524742;5463", "$qm"), and that goes with the screen
@@ -138,7 +140,14 @@ async function askAll(caps: TermCaps, timeoutMs: number) {
     if (col) caps.flagWidth = Number(col) - 1
   }
 
-  // 5. Kitty graphics query (APC, id 31, 1×1 px image), only for those who identified as capable.
+  // 5. Text drawn bigger by the terminal (OSC 66): a space at twice the size, written at the top left, takes two
+  // cells, which the cursor's column says; a terminal that doesn't know the OSC swallows it, the cursor unmoved.
+  if (caps.utf8) {
+    const col = CPR_RE.exec(await ask('\x1b[H\x1b]66;s=2; \x1b\\\x1b[6n', timeoutMs))?.[1]
+    caps.textSizing = col === '3'
+  }
+
+  // 6. Kitty graphics query (APC, id 31, 1×1 px image), only for those who identified as capable.
   if (caps.version && KITTY_TERMS.test(caps.version)) {
     const second = await ask('\x1b_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\', timeoutMs)
     caps.kittyGraphics = KITTY_OK_RE.test(second)

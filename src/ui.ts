@@ -17,7 +17,7 @@ import type { TermCaps } from './term.js'
 import { emojify, emoticonify, completeEmoji, emoticonAt } from './emoji.js'
 import { enableKittyKeyboard } from './kittykeys.js'
 import { enableBracketedPaste } from './paste.js'
-import { Hearts, reaction, emojiOnly } from './hearts.js'
+import { Hearts, reaction, emojiOnly, emojiPng } from './hearts.js'
 import { bigText } from './bigtext.js'
 import { t } from './i18n.js'
 import { parseHex, mix, nearest256, type Rgb } from './rainbow.js'
@@ -224,6 +224,20 @@ export class Ui {
   /** The faint rule over the plain line (the chat list's filter, a search), with the search's count (drawBorder). */
   private ruleTop!: blessed.Widgets.BoxElement
   private ruleChar = '─'
+  /**
+   * The terminal draws text bigger itself (OSC 66, probed: TermCaps.textSizing): emoji on their own go twice their
+   * size, as they do, in pictures, where it shows Kitty's graphics instead (emojiImages).
+   */
+  private textSizing = false
+  /** The emoji's pictures for Kitty's graphics (emojiPng), by emoji: null where it can't be drawn, absent while drawn. */
+  private emojiImages = new Map<string, Decoded | null>()
+  private emojiDrawing = new Set<string>()
+  /**
+   * The messages of emoji on their own drawn twice their size (renderMessages): the first of their two blank lines, its
+   * column, and the emoji; and those written on the terminal last, at which cell (paintBigEmoji).
+   */
+  private bigEmojis: { line: number; col: number; emoji: string[] }[] = []
+  private bigShown: { x: number; y: number; w: number; key: string }[] = []
   /** What the rule says over a search's line: its count (drawInput). */
   private borderHeader: string | null = null
   /**
@@ -544,6 +558,7 @@ export class Ui {
     })
     // Box-drawing only with a UTF-8 locale, like the frames; otherwise plain dashes.
     this.ruleChar = caps.utf8 ? '─' : '-'
+    this.textSizing = caps.textSizing
     // No wrapping: the rule fills its width, and blessed would break it at a space.
     this.ruleTop = blessed.box({ parent: this.screen, top: `100%-${this.inputRows + 2}`, left: 0, right: 0, height: 1, tags: true, wrap: false })
     this.picker = blessed.list({
@@ -668,7 +683,7 @@ export class Ui {
     const screen = this.screen as unknown as { draw: (start: number, end: number) => void }
     const draw = screen.draw.bind(screen)
     screen.draw = (start, end) => { this.rgbPaint?.snapshot(this.screenRows('olines'), this.screenRows('lines')); draw(start, end) }
-    this.screen.on('render', () => { this.loadVisibleImages(); this.loadVisibleProfiles(); this.placeImages(); this.paintRgb() })
+    this.screen.on('render', () => { this.loadVisibleImages(); this.loadVisibleProfiles(); this.placeImages(); this.paintRgb(); this.paintBigEmoji() })
 
     // The mouse wheel scrolls one line per notch (by default blessed jumps half the panel, or two list entries).
     this.msgBox.removeAllListeners('wheeldown')
@@ -3129,6 +3144,12 @@ export class Ui {
     const emoji = reaction(text)
     if (!emoji) return
     this.hearts.launch(emoji, () => {
+      // Drawn twice its size, it's born over the middle of its second line.
+      const big = this.bigEmojis.find(b => { const r = this.lineMap[b.line]; return !!r && pick(r) && reaction(r.text) === emoji })
+      const top = big ? this.msgBox._clines.ftor[big.line]?.[0] : undefined
+      if (big && top != null && top >= this.msgBox.childBase) {
+        return { x: num(this.msgBox.aleft) + num(this.msgBox.ileft) + big.col + 1, y: num(this.msgBox.atop) + num(this.msgBox.itop) + top - this.msgBox.childBase + 1 }
+      }
       let idx = -1
       for (let i = this.lineMap.length - 1; i >= 0; i--) { const r = this.lineMap[i]; if (r && pick(r)) { idx = i; break } }
       if (idx < 0) return null
@@ -3183,6 +3204,7 @@ export class Ui {
     const lines: string[] = []
     const map: (MessageRow | null)[] = []
     const images: ImageSlot[] = []
+    const bigs: typeof this.bigEmojis = []
     const selectedId = this.selected?.id
     // The selected message gets the background at full width, whoever it's from: the lines arrive here already
     // wrapped to the panel's width, and get padded with spaces up to the edge.
@@ -3330,7 +3352,23 @@ export class Ui {
           return token
         }).replace(/\uE000/g, '{underline}{yellow-fg}').replace(/\uE001/g, '{/yellow-fg}{/underline}')
           .replace(/\uE002/g, '{inverse}').replace(/\uE003/g, '{/inverse}')
-        const wrapped = shown.split('\n').flatMap(l => wrapTagged(l, wrapAt))
+        // Emoji on their own, one to three, twice their size where the terminal draws text bigger, or shows Kitty's
+        // graphics: two lines of blank cells, four columns for each, the emoji written over them after each frame
+        // (paintBigEmoji) or placed there in pictures (placeImages), and the time beside the second. One that can't be
+        // drawn in a picture keeps its message as it was.
+        const big = (this.textSizing || this.kitty) && bare ? graphemes(row.text.trim()).filter(g => g.trim()) : []
+        if (!this.textSizing && big.some(e => this.emojiImage(e) === null)) big.length = 0
+        const bigW = big.length * 4, stampW = visibleWidth(stamp)
+        const bigged = big.length > 0 && big.length <= 3 && bigW + 2 + stampW <= width
+        if (bigged) {
+          const top = ' '.repeat(bigW + 2 + stampW), bottom = `${' '.repeat(bigW)}  ${stamp}`
+          bigs.push({ line: map.length, col: mine ? width - visibleWidth(bottom) : 0, emoji: big })
+          push(mine ? alignRight(top, width) : top, row)
+          headers.add(map.length)
+          push(mine ? alignRight(bottom, width) : bottom, row)
+          stamped = true
+        }
+        const wrapped = bigged ? [] : shown.split('\n').flatMap(l => wrapTagged(l, wrapAt))
         wrapped.forEach((l, i) => {
           const tw = visibleWidth(l)
           const withStamp = bare && i === wrapped.length - 1 && tw + 2 + visibleWidth(stamp) <= width
@@ -3396,6 +3434,7 @@ export class Ui {
     this.nameLines = names
     this.mentionLines = mentions
     this.images = images
+    this.bigEmojis = bigs
     this.msgBox.setContent(lines.join('\n'))
     if (this.atBottom) this.msgBox.setScrollPerc(100)
     // The waiting line has just appeared above the oldest message in view: the view goes up the line or two to show it.
@@ -3745,7 +3784,7 @@ export class Ui {
       for (const a of this.visibleAvatars()) this.kitty.place(a.path, a.d, a.x + 1, a.y + 1, 4, 2)
       return
     }
-    if (!this.images.length || !this.current || this.pickerOpen) return
+    if (!this.current || this.pickerOpen) return
     const clines = this.msgBox._clines
     if (!clines?.ftor) return
     const base = this.msgBox.childBase
@@ -3761,6 +3800,32 @@ export class Ui {
       const row = num(this.msgBox.atop) + num(this.msgBox.itop) + (visTop - base) + 1
       this.kitty.place(img.path, img.d, col + img.pad, row, img.cols, visBottom - visTop, (visTop - top) / img.rows, (visBottom - top) / img.rows)
     }
+    // Emoji on their own twice their size, where the terminal doesn't draw text bigger itself: each in its picture,
+    // four cells by two, once both their lines are in view.
+    if (this.textSizing) return
+    for (const b of this.bigEmojis) {
+      const top = clines.ftor[b.line]?.[0]
+      if (top == null || top < base || top + 1 >= base + innerH) continue
+      const row = num(this.msgBox.atop) + num(this.msgBox.itop) + (top - base) + 1
+      b.emoji.forEach((e, k) => { const d = this.emojiImage(e); if (d) this.kitty!.place(`emoji:${e}`, d, col + b.col + 4 * k, row, 4, 2) })
+    }
+  }
+
+  /**
+   * An emoji's picture for Kitty's graphics, drawn (emojiPng) the first time it's asked for, and the frame drawn again
+   * once it is; undefined meanwhile. One that can't be drawn makes the messages be laid out again, without it big.
+   */
+  private emojiImage(emoji: string): Decoded | null | undefined {
+    if (this.emojiImages.has(emoji)) return this.emojiImages.get(emoji)
+    if (this.emojiDrawing.has(emoji)) return undefined
+    this.emojiDrawing.add(emoji)
+    void emojiPng(emoji).then(p => {
+      this.emojiDrawing.delete(emoji)
+      this.emojiImages.set(emoji, p && { w: p.size, h: p.size, png: p.png, rgba: Buffer.alloc(0), rw: 0, rh: 0 })
+      if (!p) this.dirtyMessages = true
+      this.scheduleRender()
+    })
+    return undefined
   }
 
   /** The chat list's pictures whose two rows are both in view, and the screen cell (0-based) of their top left. */
@@ -3769,6 +3834,50 @@ export class Ui {
     const rows = num(this.picker.height) - num(this.picker.iheight)
     const x = num(this.picker.aleft) + num(this.picker.ileft), y = num(this.picker.atop) + num(this.picker.itop)
     return [...this.pickerAvatars].filter(([i]) => i >= base && i + 1 < base + rows).map(([i, a]) => ({ ...a, x, y: y + i - base }))
+  }
+
+  /**
+   * After each frame, the emoji of the messages drawn twice their size (bigEmojis), written on their blank cells by
+   * the terminal itself (OSC 66, two cells wide each before doubling, so a skin tone or a flag takes no more), on the
+   * terminal's own background: those with both lines in view and their cells still blank in blessed's buffer, so
+   * whatever is drawn over them (a notice, the rising emoji) keeps its place. Written again every frame, as blessed
+   * may have written over any of them, which takes the whole emoji away; those drawn last that went elsewhere or
+   * away are cleared first, where blessed believes its blank cells are already on the screen.
+   */
+  private paintBigEmoji() {
+    if (!this.textSizing) return
+    const lines = this.screenRows('lines')
+    const blank = (x: number, y: number, w: number) => [y, y + 1].every(r => {
+      const row = lines[r]
+      if (!row) return false
+      for (let c = x; c < x + w; c++) if (row[c]?.[1] !== ' ') return false
+      return true
+    })
+    const now: typeof this.bigShown = []
+    let out = ''
+    if (this.current && !this.pickerOpen && !this.showingQr && !this.viewing) {
+      const clines = this.msgBox._clines, base = this.msgBox.childBase, innerH = this.innerHeight()
+      const x0 = num(this.msgBox.aleft) + num(this.msgBox.ileft), y0 = num(this.msgBox.atop) + num(this.msgBox.itop)
+      for (const b of this.bigEmojis) {
+        const top = clines?.ftor?.[b.line]?.[0]
+        if (top == null || top < base || top + 1 >= base + innerH) continue
+        const x = x0 + b.col, y = y0 + top - base, w = b.emoji.length * 4
+        if (!blank(x, y, w)) continue
+        now.push({ x, y, w, key: b.emoji.join('') })
+        out += `\x1b[${y + 1};${x + 1}H${b.emoji.map(e => `\x1b]66;s=2:w=2;${e}\x1b\\`).join('')}`
+      }
+    }
+    const codeAttr = (this.screen as unknown as { codeAttr: (attr: number) => string }).codeAttr.bind(this.screen)
+    let clear = ''
+    for (const o of this.bigShown) {
+      if (now.some(n => n.x === o.x && n.y === o.y && n.key === o.key) || !blank(o.x, o.y, o.w)) continue
+      for (const r of [o.y, o.y + 1]) {
+        clear += `\x1b[${r + 1};${o.x + 1}H`
+        for (let c = o.x; c < o.x + o.w; c++) clear += `${codeAttr(lines[r]![c]![0])} `
+      }
+    }
+    this.bigShown = now
+    if (clear || out) (this.screen.program as unknown as { _write: (s: string) => void })._write(`\x1b7${clear}\x1b[0m${out}\x1b[0m\x1b8`)
   }
 
   /** blessed's frame buffers: `lines` is the frame being built, `olines` the one last drawn to the terminal. */
