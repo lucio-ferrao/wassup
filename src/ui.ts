@@ -400,7 +400,7 @@ export class Ui {
   private textSel: { ax: number; ay: number; hx: number; hy: number; xi: number; xl: number; input: boolean } | undefined
   /** The terminal reports the pointer's movement with no button held (mode 1003): only then is there a hover. */
   private anyMotion: boolean
-  /** Message under the pointer: its name line gets a "☺" that opens the quick reactions. */
+  /** Message under the pointer: its time line gets a "☺" that opens the quick reactions. */
   private hover: MessageRow | undefined
   /** Message whose quick-reaction bar is open, after a click on its "☺". */
   private quickFor: MessageRow | undefined
@@ -1406,7 +1406,7 @@ export class Ui {
   }
 
   /**
-   * Over the hovered message's name line: a gray "☺" to its right (to its left in mine, which sit flush right),
+   * Over the hovered message's time line: a gray "☺" to its right (to its left in mine, which sit flush right),
    * or, once clicked, the quick reactions in its place. Drawn straight into the screen buffer, so the panel isn't
    * rebuilt at every pointer move; where it landed is kept for the click.
    */
@@ -1414,8 +1414,9 @@ export class Ui {
     this.quickHit = undefined
     const row = this.quickFor ?? this.hover
     if (!row || this.showingQr || this.viewing) return
+    // On the line with its time, the last of its header lines (in a group, the sender's name opens the message).
     let idx = -1
-    for (let i = 0; i < this.lineMap.length; i++) if (this.lineMap[i]?.id === row.id && this.headerLines.has(i)) { idx = i; break }
+    for (let i = 0; i < this.lineMap.length; i++) if (this.lineMap[i]?.id === row.id && this.headerLines.has(i)) idx = i
     if (idx < 0) return
     const real = this.msgBox._clines.ftor[idx]?.[0]
     if (real == null) return
@@ -1427,7 +1428,7 @@ export class Ui {
     if (!line) return
     const mine = row.from_me === 1
     const blank = (x: number) => { const ch = line[x]?.[1]; return ch === ' ' || ch === '' }
-    // Where the name line's text starts (mine) or ends (others).
+    // Where the time line's text starts (mine) or ends (others).
     let edge = mine ? xi : xl - 1
     if (mine) while (edge < xl && blank(edge)) edge++
     else while (edge >= xi && blank(edge)) edge--

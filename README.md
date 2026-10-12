@@ -96,10 +96,11 @@ dark shades.
   pressed again (the band says how): yours for everyone, as the phone does, for two days after it was sent, and any
   other only for you. Mentions show the person's first name in their colour (`@Ana`); a click on one, or in a group on a
   member's name, opens the chat with them; a click on a pin (`📌 pinned a message`) goes to the message it's about. The
-  `☺` next to a message under the pointer opens its quick reactions; a double click, dragging it to the right, or → with
-  it selected, starts a reply. Ctrl+F searches the open chat's whole history, accents and case aside: the input becomes
-  `procurar ❯`, the matches are shown in reverse video and the most recent one selected, ↑ goes to an older one and ↓ to
-  a newer one, with a count on the rule above the input; Enter stays on it, Esc closes.
+  `☺` on the line with the time of a message under the pointer, after the time (before the bubble in yours), opens its
+  quick reactions; a double click, dragging it to the right, or → with it selected, starts a reply. Ctrl+F searches the
+  open chat's whole history, accents and case aside: the input becomes `procurar ❯`, the matches are shown in reverse
+  video and the most recent one selected, ↑ goes to an older one and ↓ to a newer one, with a count on the rule above
+  the input; Enter stays on it, Esc closes.
 - **Input**: grows with the text up to half the screen; what's being replied to, reacted to or edited shows on the
   band's first row; Enter sends, Shift+Enter or Ctrl+J start a new line, and pasting several lines keeps them. Ctrl-U
   clears, Shift-Backspace deletes a word (with the Kitty keyboard protocol). `:` and a letter open the emoji list;
