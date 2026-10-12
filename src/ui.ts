@@ -437,6 +437,8 @@ export class Ui {
   private viewerImg: { d: Decoded; path: string; x: number; y: number; cols: number; rows: number } | undefined
   private mode: ImageMode
   private kitty: KittyImages | undefined
+  /** Once the terminal stops being resized, the images are sent to it again (see the 'resize' handler). */
+  private resendTimer: NodeJS.Timeout | undefined
   /** Half-block images and message bubbles repainted in 24-bit colour, when the terminal takes it. */
   private rgbPaint: RgbPainter | undefined
   private connText = t('connecting')
@@ -678,7 +680,14 @@ export class Ui {
     this.bindDiagnostics()
     this.screen.on('keypress', (ch: string, key: blessed.Widgets.Events.IKeyEventArg) => this.onKey(ch, key))
     // The picker list has its position and height calculated by hand: it's recomputed when the terminal resizes.
-    this.screen.on('resize', () => { this.dirtyMessages = true; this.dirtyTabs = true; this.drawInput(); if (this.pickerOpen) this.refreshPicker(); this.scheduleRender() })
+    this.screen.on('resize', () => {
+      this.dirtyMessages = true; this.dirtyTabs = true; this.drawInput(); if (this.pickerOpen) this.refreshPicker(); this.scheduleRender()
+      // A terminal may drop the images it holds when resized (on Ghostty they were gone for good), and placing them by
+      // the ids it was given before then shows nothing: once the resizing stops, they're all let go and sent again.
+      if (!this.kitty) return
+      clearTimeout(this.resendTimer)
+      this.resendTimer = setTimeout(() => { this.kitty?.dispose(); this.scheduleRender() }, 200)
+    })
     // The painter looks at blessed's buffers just before it draws, when it's known which rows it will redraw.
     const screen = this.screen as unknown as { draw: (start: number, end: number) => void }
     const draw = screen.draw.bind(screen)
