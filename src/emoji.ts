@@ -13,7 +13,8 @@ const EMOJI: [string, string[], string[]][] = [
   ['😉', ['piscadela'], ['wink']],
   ['😛', ['lingua'], ['tongue', 'stuck_out_tongue']],
   ['😘', ['beijinho'], ['kissing_heart']],
-  ['😍', ['apaixonado', 'olhos_de_coracao'], ['heart_eyes']],
+  ['😍', ['apaixonado', 'apaixonada', 'olhos_de_coracao', 'amor', 'paixao', 'coracao'], ['heart_eyes', 'in_love', 'love']],
+  ['🥰', ['coracoes', 'carinho', 'apaixonado', 'apaixonada', 'amor', 'paixao', 'coracao'], ['smiling_face_with_hearts', 'three_hearts', 'in_love', 'love']],
   ['🤔', ['pensativo', 'a_pensar'], ['thinking']],
   ['😐', ['neutro', 'sem_expressao'], ['neutral', 'neutral_face']],
   ['😢', ['triste', 'lagrima'], ['cry']],
@@ -212,8 +213,17 @@ const EMOJI: [string, string[], string[]][] = [
   ['🇩🇪', ['alemanha', 'de'], ['germany', 'de']],
 ]
 
+/**
+ * Each :name: to its emoji. A name several share (":amor:", for the heart and the faces in love, so the list offers
+ * them all) goes to the one that lists it soonest, on a tie the first in the table: ":amor:" stays the heart.
+ */
 const TABLE: Record<string, string> = {}
-for (const [emoji, pt, en] of EMOJI) for (const name of [...pt, ...en]) TABLE[name] ??= emoji
+const SOONEST: Record<string, number> = {}
+for (const [emoji, pt, en] of EMOJI) {
+  [...pt, ...en].forEach((name, i) => {
+    if (i < (SOONEST[name] ?? Infinity)) { TABLE[name] = emoji; SOONEST[name] = i }
+  })
+}
 
 const CODE_RE = /(^|[^\w:]):([a-z0-9_+-]+):(?=[^\w:]|$)/gi
 
@@ -288,7 +298,7 @@ export const emojiCodes = Object.keys(TABLE)
  * smileys that start that way (":D" for "D"; on its own, the basic ones: ":)", ":D", ":("...), in the table's order;
  * then the emojis whose name, in Portuguese or in English, starts with `prefix`, with the first matching name, one in
  * the user's language when both match. Shorter names first, so an exact match ("fixe") comes before a longer one;
- * ties keep the table order.
+ * on a tie, the emoji the name stands for when typed whole (":amor:" the heart) first, then the table order.
  */
 export function completeEmoji(prefix: string): { emoji: string; code: string }[] {
   const out: { emoji: string; code: string }[] = []
@@ -304,7 +314,7 @@ export function completeEmoji(prefix: string): { emoji: string; code: string }[]
     const name = own.find(n => n.startsWith(p)) ?? other.find(n => n.startsWith(p))
     if (name && !out.some(o => o.emoji === emoji) && !named.some(o => o.emoji === emoji)) named.push({ emoji, name })
   }
-  named.sort((a, b) => a.name.length - b.name.length)
+  named.sort((a, b) => a.name.length - b.name.length || Number(TABLE[b.name] === b.emoji) - Number(TABLE[a.name] === a.emoji))
   return [...out, ...named.map(o => ({ emoji: o.emoji, code: `:${o.name}:` }))]
 }
 
