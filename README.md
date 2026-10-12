@@ -48,35 +48,37 @@ colours are the terminal theme's, and on startup the terminal is asked for its r
 dark shades.
 
 - **Tabs**: one per open chat, under the band where you write: the chat's photo (two cells by one, real pixels with
-  Kitty, half-blocks otherwise; a click on it opens it large), its name and its state's emoji (see Writing
-  suggestions), and the unread count in red; the active one on the band's green, as its label, its name in the colour
-  it has in groups, the others on a quieter grey. A click on another tab goes to that chat, on the active one opens
-  the chat list; Esc closes the active one. Tab cycles through them, or, with only one open, opens the chat list;
-  whatever is left unsent stays with each chat. While someone is typing in a chat, two emoji take turns in its tab
-  where its state's emoji is (💬, 💭). New messages in a chat without a tab open one without activating it, with a
-  passing notice over it and the bell; an archived chat stays quiet.
-- **Chats**: `wa` starts on the list, and `/`, or a click on the active tab, opens it again, under the app's name,
-  most recent at the bottom, under a separator for each day, as the messages are (`hoje`, `ontem`, `12 set`), a blank
-  row between chats. Each takes two rows, its photo from WhatsApp on the left of both (four cells by two, real pixels
-  with Kitty, half-blocks otherwise; its initials on its colour without one). On the first row, the name in its
-  colour, its state's emoji (or, while someone types there, 💬 and 💭 taking turns in its place), the unread count in
-  red, as the tabs have them, 👀 while the person is online, and at the right edge the time of the last message, its
-  day being its separator's (with a filter, which has no separators, the day too: `ontem 21:35`, `12 set 21:35`), in
-  the column your messages' times end in. On the second, under the name, the person's number (without the country code
-  when it's the same as mine, and 💼 after it for a WhatsApp Business account, known from its messages or its business
-  profile) or a group's number of members. The selected chat is on the green of the band where you write, as the active
-  tab is, up to its time, which stays out flush right, as a message's does. Back within 30 seconds, the list opens on
-  the chat you were in, selected; otherwise none is, till the first ↑ or ↓ selects the most recent, or a filter its best
-  match, and till then Enter, Tab and → open nothing. Your chat with yourself goes by your profile name and "(eu)",
-  where WhatsApp gives only a masked number. Photos, "abouts" and group sizes are asked of WhatsApp for the chats in
-  view, at most once a day, and kept; a chat opened whose person has no name here (only the number, or the masked one
-  WhatsApp gives for someone not saved) has its latest messages asked of the phone again, at most once a day, as its
-  copy may carry the profile name; a click on a photo opens it large, with its description, as images do. What's typed
-  in the band, with the list's own tab, `wassup`, active under it, filters it word by word, ignoring accents and
-  case, with the matches underlined; Enter, Tab, → or a click opens. Ctrl+F there searches the messages of every chat
-  instead (the tab says `procurar`; again or Esc back to the names): from two characters on, the list holds those that
-  have all the words, the most recent at the bottom, each as its chat, who wrote it and when, and two lines of its text
-  from a little before the match, the matches in reverse video; Enter or a click opens the chat on that message.
+  Kitty, half-blocks otherwise; a click on it opens it large), its name and its state's emoji (see Writing suggestions;
+  its place kept blank till there's one), or 🔔 in its place with messages unread; the active one on the band's green, as
+  its label, its name in the colour it has in groups, the others on a quieter grey. A click on another tab goes to that
+  chat; Esc closes the active one, and the faint ✖ a tab shows in its state's place while the pointer is over it closes
+  that one (on the list's own tab, it closes the list, as Esc does there). Tab cycles through them, or, with only one
+  open, opens the chat list; whatever is left unsent stays with each chat. While someone is typing in a chat, two emoji
+  take turns in its tab where its state's emoji is (💬, 💭). New messages in a chat without a tab open one without
+  activating it, with a passing notice over it and the bell; an archived chat stays quiet.
+- **Chats**: `wa` starts on the list, and `/` opens it again, under the app's name with its 👾, most recent at the
+  bottom, under a separator for each day, as the messages are (`hoje`, `ontem`, `12 set`), a blank row between chats.
+  Each takes two rows, its photo from WhatsApp on the left of both (four cells by two, real pixels with Kitty,
+  half-blocks otherwise; its initials on its colour without one). On the first row, the name in its colour, its state's
+  emoji (or, while someone types there, 💬 and 💭 taking turns in its place), the unread count in red, 👀 while the person
+  is online, and at the right edge the time of the last message, its day being its separator's (with a filter, which has
+  no separators, the day too: `ontem 21:35`, `12 set 21:35`), in the column your messages' times end in. On the second,
+  under the name, the person's number (without the country code when it's the same as mine, and 💼 after it for a
+  WhatsApp Business account, known from its messages or its business profile) or a group's number of members. The
+  selected chat is on the green of the band where you write, as the active tab is, up to its time, which stays out flush
+  right, as a message's does. Back within 30 seconds, the list opens on the chat you were in, selected; otherwise none
+  is, till the first ↑ or ↓ selects the most recent, or a filter its best match, and till then Enter, Tab and → open
+  nothing. Your chat with yourself goes by your profile name and "(eu)", where WhatsApp gives only a masked number.
+  Photos, "abouts" and group sizes are asked of WhatsApp for the chats in view, at most once a day, and kept; a chat
+  opened whose person has no name here (only the number, or the masked one WhatsApp gives for someone not saved) has its
+  latest messages asked of the phone again, at most once a day, as its copy may carry the profile name; a click on a
+  photo opens it large, with its description, as images do. What's typed in the band, with the list's own tab, `wassup`,
+  active under it (after its name, 💬 and 💭 taking turns while someone types in any chat, or else 🔔 with messages unread
+  in any, and 👾 with neither), filters it word by word, ignoring accents and case, with the matches underlined; Enter,
+  Tab, → or a click opens. Ctrl+F there searches the messages of every chat instead (the tab says `procurar`; again or
+  Esc back to the names): from two characters on, the list holds those that have all the words, the most recent at the
+  bottom, each as its chat, who wrote it and when, and two lines of its text from a little before the match, the matches
+  in reverse video; Enter or a click opens the chat on that message.
 - **Messages**: yours on the right, each in a bubble with WhatsApp Web's colours where the terminal takes 24-bit colour
   (yours, on a dark theme, toned down to the brightness of theirs) and two discreet greys otherwise, with the time
   outside it, yours with their state in its separator (`14 06` not sent yet, `14.06` sent, `14:06` delivered; `14:06❮`

@@ -328,6 +328,12 @@ export class Ui {
   private tabs: string[] = []
   private active = -1
   private segments: TabSegment[] = []
+  /**
+   * The tab under the pointer (-1 the chat list's own, null none), which shows a ✖ to close it in its state's place,
+   * and where that ✖ is.
+   */
+  private tabHover: number | null = null
+  private tabCloses: { x: number; index: number }[] = []
   private pickerOpen = false
   private chats: ChatRow[] = []
   private filtered: ChatRow[] = []
@@ -738,17 +744,23 @@ export class Ui {
       this.lightPickerRows(i)
     })
 
-    // A click on another tab goes to that chat; on the active one, the chat list opens, as "/" does; on a tab's photo,
-    // the photo opens large.
+    // A click on another tab goes to that chat (on the active one, with the chat list open, back to it); on a tab's
+    // photo, the photo opens large; on the ✖ a tab shows under the pointer, it closes.
     this.tabsBar.on('click', (data: { x: number; y: number }) => {
       const x = data.x - num(this.tabsBar.aleft)
       const seg = this.segments.find(s => x >= s.x0 && x < s.x1)
       uiLog.info({ x, seg }, 'tab bar click')
       if (!seg) return
+      const close = this.tabCloses.find(c => x >= c.x && x <= c.x + 1)
+      if (close) {
+        this.tabHover = null
+        // The list's own, as Esc there: back to the chat in front, or with no tab left, out.
+        if (close.index < 0) return this.tabs.length ? this.closePicker() : this.quit()
+        return this.closeTab(close.index)
+      }
       const tp = this.tabPhotos.find(p => x >= p.x && x < p.x + 2)
       if (tp) return this.openPhoto(tp.jid)
-      if (this.pickerOpen || seg.index !== (this.fixed ? 0 : this.active)) return this.fixed ? undefined : this.activateTab(seg.index)
-      this.openPicker()
+      if (!this.fixed && (this.pickerOpen || seg.index !== this.active)) this.activateTab(seg.index)
     })
     // Clicking a message's "☺" opens its quick reactions, clicking an attachment opens it; outside messages a click
     // returns focus to the input. Selecting is for the keyboard. Dragging a message's name and time line to the right (press and release on
@@ -874,6 +886,11 @@ export class Ui {
     let selPress: { x: number; y: number; xi: number; xl: number; yi: number; yl: number; input: boolean } | undefined
     this.screen.on('mouse', (d: { action: string; x: number; y: number; raw?: number[] }) => {
       if (d.action === 'mousemove') {
+        // On the tab bar, the chat's tab under the pointer shows a ✖ to close it (drawTabs).
+        const bx = d.x - num(this.tabsBar.aleft)
+        const seg = d.y === num(this.tabsBar.atop) ? this.segments.find(s => bx >= s.x0 && bx < s.x1) : undefined
+        const tab = seg ? seg.index : null
+        if (tab !== this.tabHover) { this.tabHover = tab; this.dirtyTabs = true; this.scheduleRender() }
         const row = !this.pickerOpen && inside(this.msgBox, d.x, d.y) ? lineAt(d.y)?.row ?? undefined : undefined
         // A redraw when the message under the pointer changes, and along the line with the "☺" or the reactions,
         // where the one under the pointer is highlighted.
@@ -1846,10 +1863,11 @@ export class Ui {
 
   /**
    * The tab bar, under the input: one tab per open chat (in single-chat mode, that one), its photo (tabPhotos), its
-   * name and its state's emoji (moodOf), or in its place two emoji taking turns while someone types there, and the
-   * unread count in red. The active one on my bubbles' green, as the band it's the label of, its name in its colour,
-   * bold; the others on the other side's grey, quieter. No × to close: Esc closes the active one. With the chat list
-   * open, its own tab comes first and is the active one, "wassup" (or "procurar", searching them all). Names
+   * name and its state's emoji (moodOf), or in its place two emoji taking turns while someone types there, or 🔔
+   * with messages unread. The active one on my bubbles' green, as the band it's the label of, its name in its colour,
+   * bold; the others on the other side's grey, quieter. The one under the pointer shows a faint ✖ in its state's
+   * place, which closes it, as Esc closes the active one. With the chat list open, its own tab comes first and is the
+   * active one, "wassup" (or "procurar", searching them all), its ✖ closing the list. Names
    * shorten for the tabs to fit, down to 6 characters. Against the right edge, a passing message or the connection's
    * state when it needs attention.
    */
@@ -1857,15 +1875,23 @@ export class Ui {
     const width = num(this.tabsBar.width)
     const list = this.fixed ? (this.current ? [this.current] : []) : this.tabs
     const activeAt = this.pickerOpen ? -1 : this.fixed ? 0 : this.active
-    // While someone types there, the two emoji taking turns (typingEmoji) stand where the state's is.
+    // While someone types there, the two emoji taking turns (typingEmoji) stand where the state's is; with no state
+    // (yet), its place is kept blank, so the tab doesn't grow when one comes.
     const tabs = list.map((jid, i) => {
       const chat = store.getChat(jid)
-      const mood = this.typing.has(jid) ? ` ${typingEmoji()}` : this.moodOf(jid, chat?.last_ts)
-      return { jid, i, name: chatName(jid), mood, badge: chat?.unread ? `(${chat.unread})` : '' }
+      // With messages unread, 🔔 in the state's place (while someone types there, the typing emoji still win).
+      const mood = this.typing.has(jid) ? ` ${typingEmoji()}` : chat?.unread ? ' 🔔' : this.moodOf(jid, chat?.last_ts) || '   '
+      // Under the pointer, a faint ✖ to close it where the state's emoji is, as wide (tabHover).
+      const closing = i === this.tabHover && !this.fixed
+      return { jid, i, name: chatName(jid), mood: closing ? ' ✖'.padEnd(Math.max(2, strWidth(mood))) : mood, closing }
     })
-    // With the chat list open, its own tab comes first, active: the band is its filter's.
+    // With the chat list open, its own tab comes first, active: the band is its filter's. After its name, the place
+    // of an emoji: the two taking turns while someone types in any chat (typingEmoji); otherwise 🔔 with messages
+    // unread in any, as a tab has it; and under the pointer a ✖ that closes the list, as Esc does. With nothing to
+    // show, the app's own, 👾, the tab keeping its width.
     const own = this.pickerOpen ? (this.pickerSearch ? t('search') : APP) : ''
-    const ownW = own ? strWidth(own) + 3 : 0
+    const ownClose = !!own && this.tabHover === -1
+    const ownW = own ? strWidth(own) + 3 + 3 : 0
     // Each tab: a cell either side of its text, and a cell between tabs; the first starts where the band does.
     // Each one's photo, before its name, once it has one (its cells kept while it's decoded, so nothing moves).
     const photoOf = (jid: string) => {
@@ -1874,17 +1900,21 @@ export class Ui {
     }
     const photos = new Map(tabs.map(t => [t.i, photoOf(t.jid)]))
     this.tabPhotos = []
-    const overhead = (t: (typeof tabs)[number]) => 2 + strWidth(t.mood) + (t.badge ? strWidth(t.badge) + 1 : 0) + 1 + (photos.get(t.i) ? 3 : 0)
+    const overhead = (t: (typeof tabs)[number]) => 2 + strWidth(t.mood) + 1 + (photos.get(t.i) ? 3 : 0)
     let nameW = Math.max(...tabs.map(t => strWidth(t.name)), 0)
     const fits = (w: number) => 1 + ownW + tabs.reduce((sum, t) => sum + Math.min(strWidth(t.name), w) + overhead(t), 0) <= width
     while (nameW > 6 && !fits(nameW)) nameW--
     let out = '', x = 0
     this.segments = []
+    this.tabCloses = []
     if (own) {
       const bg = this.bubbleBg.mine
       const strong = this.dark ? 'bright-white' : 'black'
-      out += ` {${bg}-bg} {${strong}-fg}{bold}${esc(own)}{/bold}{/${strong}-fg} {/${bg}-bg}`
+      const unread = store.listChats().some(c => c.unread > 0 && !c.archived)
+      const close = ownClose ? ` ${dim('✖')} ` : this.typing.size ? ` ${typingEmoji()}` : unread ? ' 🔔' : ' 👾'
+      out += ` {${bg}-bg} {${strong}-fg}{bold}${esc(own)}{/bold}{/${strong}-fg}${close} {/${bg}-bg}`
       this.segments.push({ x0: 1, x1: ownW, index: -1 })
+      if (ownClose) this.tabCloses.push({ x: 2 + strWidth(own) + 1, index: -1 })
       x = ownW
     }
     for (const t of tabs) {
@@ -1893,7 +1923,6 @@ export class Ui {
       const bg = active ? this.bubbleBg.mine : this.bubbleBg.theirs
       const color = active ? colorFor(t.jid) : FG.tab
       const lead = ` {${bg}-bg} `
-      const badge = t.badge ? ` {${FG.badge}-fg}{bold}${t.badge}{/bold}{/${FG.badge}-fg}` : ''
       const label = active ? `{bold}${esc(name)}{/bold}` : esc(name)
       // The photo, two cells and one of gap after the tab's spare cell: blank where Kitty places it, half-blocks
       // otherwise (their full reset at the end, the tab's background opened again after it).
@@ -1912,9 +1941,11 @@ export class Ui {
           }
         }
       }
-      const w = 2 + (photo ? 3 : 0) + strWidth(name) + strWidth(t.mood) + (t.badge ? strWidth(t.badge) + 1 : 0)
+      const w = 2 + (photo ? 3 : 0) + strWidth(name) + strWidth(t.mood)
       this.segments.push({ x0: x + 1, x1: x + 1 + w, index: t.i })
-      out += `${lead}${photo}{${color}-fg}${label}{/${color}-fg}${t.mood}${badge} {/${bg}-bg}`
+      if (t.closing) this.tabCloses.push({ x: x + 2 + (photo ? 3 : 0) + strWidth(name) + 1, index: t.i })
+      const mood = t.closing ? t.mood.replace('✖', dim('✖')) : t.mood
+      out += `${lead}${photo}{${color}-fg}${label}{/${color}-fg}${mood} {/${bg}-bg}`
       x += 1 + w
     }
     // Status flush right: the transient message (yellow) or the connection; truncated if it doesn't fit.
@@ -2227,7 +2258,7 @@ export class Ui {
    * A chat's two rows in the list, the photo (avatarCells) in the first four cells of both. On the first, its name in
    * the colour it has as a sender in groups (bold with unread messages, the filter's words underlined), its state's
    * emoji (moodOf), or in its place, while someone types there, the two emoji taking turns (typingEmoji), the unread
-   * count in red, as the tabs have them, 👀 while the person is online, "·" when it has a tab, and at the right edge
+   * count in red, 👀 while the person is online, "·" when it has a tab, and at the right edge
    * the time of the last message, its day being its separator's (with a filter, the day too, fmtWhenAt). On the
    * second, under the name, the person's number or the group's size (chatNumber). The second row comes in its parts
    * (see pickerParts).
@@ -2419,9 +2450,9 @@ export class Ui {
   }
 
   /**
-   * Over the list: the app's name in WhatsApp's green, big (WORDMARK), with the counts at the right of its second
-   * row, or of its third (where only the p's tail is) when the terminal is too narrow for them there, cut to fit at
-   * worst; without UTF-8 on one line, the counts after it.
+   * Over the list: the app's name in WhatsApp's green, big (WORDMARK), with its 👾 at the right of its first row and
+   * the counts at the right of its second, or of its third (where only the p's tail is) when the terminal is too
+   * narrow for them there, cut to fit at worst; without UTF-8 on one line, the counts after it.
    */
   private drawPickerHead(big: boolean) {
     const unread = this.chats.filter(c => c.unread > 0).length
@@ -2438,7 +2469,7 @@ export class Ui {
       const shown = after(row) >= 2 ? counts : room > 3 ? dim(esc(truncate(plain, room))) : ''
       const fill = w - strWidth(WORDMARK[row]!) - visibleWidth(shown)
       this.pickerHead.height = WORDMARK.length
-      this.pickerHead.setContent(WORDMARK.map((l, i) => green(l) + (i === row && shown ? ' '.repeat(fill) + shown : '')).join('\n'))
+      this.pickerHead.setContent(WORDMARK.map((l, i) => green(l) + (i === 0 ? '  👾' : '') + (i === row && shown ? ' '.repeat(fill) + shown : '')).join('\n'))
     } else {
       this.pickerHead.height = 1
       this.pickerHead.setContent(`{bold}${green(APP)}{/bold}  ${counts}`)
