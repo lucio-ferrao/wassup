@@ -70,6 +70,13 @@ const WORDMARK = [
   '                      ╵',
 ]
 /** Someone typing, where a chat's state is (its tab, its row) or in the window title: two emoji taking turns every 500 ms. */
+/**
+ * What a space does with emoji suggestions open, learnt for each kind from whether they were taken the last two times
+ * (noteSuggest): in "text" it goes in and closes them, what was typed staying; in "emoji" it takes the chosen one.
+ * Kept in the state table for every terminal, under the kind: the mode and the last two times, true where taken.
+ */
+type SuggestKind = 'smileys' | 'emojiNames'
+type SuggestMode = { mode: 'text' | 'emoji'; last: boolean[] }
 const typingEmoji = () => (Math.floor(Date.now() / 500) % 2 ? '💭' : '💬')
 /**
  * The time of a message of mine, carrying its state in the separator: "14 06" waiting to leave, "14.06" sent (one
@@ -214,6 +221,12 @@ export class Ui {
   private suggestTop = 0
   /** Whether the suggestions are for a smiley: Enter then sends it as typed, and only Tab or → swap it. */
   private suggestFace = false
+  /**
+   * Which suggestions a space may take, learnt apart: a smiley's emoji (":)"), or an emoji by its name once a
+   * character follows the colon (":smi"); none for the basic smileys of a bare ":" or for mentions.
+   */
+  private suggestKind: SuggestKind | null = null
+
   /** Local model suggestion for the text `text` (continuation or correction), requested 150 ms after the last keystroke and shown for 4 s. */
   private ghost: { text: string; s: Suggestion } | undefined
   /** What floats above the input (its key: a correction's place and text, or the word), and the one whose 10 s ran out. */
@@ -1123,7 +1136,10 @@ export class Ui {
     // active tab, the program.
     if (k === 'escape') {
       if (this.quickFor) { this.quickFor = undefined; return this.screen.render() }
-      if (this.suggestions.length) { this.suggestions = []; this.drawSuggestions(); this.drawInput(); return this.screen.render() }
+      if (this.suggestions.length) {
+        if (this.suggestKind) this.noteSuggest(this.suggestKind, false)
+        this.suggestions = []; this.drawSuggestions(); this.drawInput(); return this.screen.render()
+      }
       if (this.replyTo || this.reactTo) { this.replyTo = this.reactTo = null; this.drawInput(); return this.screen.render() }
       if (this.deleting) { this.deleting = null; this.drawInput(); return this.screen.render() }
       if (this.editing) { this.editing = null; this.inputValue = ''; this.cursor = 0; this.updateSuggestions(); this.drawInput(); return this.screen.render() }
@@ -1204,6 +1220,12 @@ export class Ui {
           return this.screen.render()
         }
         if ((k === 'enter' || k === 'return') && !(this.suggestFace && this.suggestIndex === 0)) return this.acceptSuggestion()
+        // A space takes the chosen emoji or goes in, as learnt (noteSuggest); after a smiley, Enter sends it as typed.
+        if (this.suggestKind && ch === ' ') {
+          if (store.getState<SuggestMode>(this.suggestKind)?.mode === 'emoji') return this.acceptSuggestion()
+          this.noteSuggest(this.suggestKind, false)
+        }
+        if (this.suggestFace && (k === 'enter' || k === 'return')) this.noteSuggest('smileys', false)
       }
       if (k === 'enter' || k === 'return') {
         const v = this.inputValue, draft = this.draftShown()
@@ -2679,6 +2701,7 @@ export class Ui {
     const same = options.length === this.suggestions.length && options.every((o, i) => o.emoji === this.suggestions[i]!.emoji)
     this.suggestions = options
     this.suggestFace = !!face
+    this.suggestKind = face ? 'smileys' : m && typed > 1 && options.length ? 'emojiNames' : null
     if (!same) this.suggestIndex = 0
     this.drawSuggestions()
     this.scheduleGhost(ghostDelay)
@@ -2935,14 +2958,15 @@ export class Ui {
     // margin on the right, which also serves as padding: blessed wraps the line if a closing tag lands on the last column.
     this.suggest.width = Math.max(...lines.map(visibleWidth)) + 2
     this.suggest.height = shown.length
-    // Over the input's top rule, its last line on the rule.
-    this.suggest.top = `100%-${this.bottom + shown.length - 1}`
+    // Right above the band where the text is written, over the messages, so it never covers what's being typed.
+    this.suggest.top = `100%-${this.bottom + shown.length}`
     this.suggest.setContent(shown.join('\n'))
     this.suggest.show()
   }
 
   /** The `:prefix`, the smiley or the `@name` gives way to the chosen emoji or mention, followed by a space. */
   private acceptSuggestion() {
+    if (this.suggestKind) this.noteSuggest(this.suggestKind, true)
     const o = this.suggestions[this.suggestIndex]!
     const chars = graphemes(this.inputValue)
     const at = Math.min(this.cursor, chars.length)
@@ -2954,6 +2978,17 @@ export class Ui {
     this.drawSuggestions()
     this.drawInput()
     return this.screen.render()
+  }
+
+  /**
+   * Suggestions of this kind taken (Tab, →, Enter on a name's, a space in "emoji") or not (a space in "text", Esc,
+   * Enter after a smiley): with the last two times alike, the mode follows them (SuggestKind); unlike, it stays.
+   */
+  private noteSuggest(kind: SuggestKind, taken: boolean) {
+    const kept = store.getState<SuggestMode>(kind)
+    const last = [...(kept?.last ?? []), taken].slice(-2)
+    const mode = last.length === 2 && last[0] === last[1] ? (taken ? 'emoji' : 'text') : kept?.mode ?? 'text'
+    store.setState(kind, { mode, last } satisfies SuggestMode)
   }
 
   private drawInput() {
