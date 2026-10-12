@@ -977,13 +977,15 @@ export class Ui {
         }
         return
       }
-      if (this.tabs.includes(jid)) { this.screen.program.bell(); this.notify(jid, row.text || `[${row.type}]`); return }
+      // The notice's text with its mentions by first name, as the message shows them (withMentions).
+      const said = row.text ? withMentions(row.text) : `[${row.type}]`
+      if (this.tabs.includes(jid)) { this.screen.program.bell(); this.notify(jid, said); return }
       // Chat without a tab: with several terminals, only the most recently used one opens the tab, and never if the
       // chat already has a tab in another live terminal.
       if (this.openElsewhere(jid) || !this.isMostRecentTerminal()) return
       this.openTab(jid, false)
       this.screen.program.bell()
-      this.notify(jid, row.text || `[${row.type}]`)
+      this.notify(jid, said)
     })
     this.wa.on('status', text => this.flash(text))
     // A reaction, mine or someone else's, animates from the spot where it appears in the message.
