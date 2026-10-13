@@ -1877,8 +1877,9 @@ export class Ui {
     this.dirtyMessages = true
     this.lineMap = []; this.images = []; this.rows = []; this.selected = null
     this.saveTabs()
-    // Closing the last tab goes back to the chat list, on the chat closed, where Esc, with no tab left, quits.
-    if (!this.tabs.length) return this.openPicker('', closing)
+    // Closing the last tab goes back to the chat list, on the chat closed, where Esc, with no tab left, quits. In
+    // single-chat mode (Herdr's panes, each a chat, and `wa <name>`) closing the chat quits, its pane with it.
+    if (!this.tabs.length) return this.fixed ? this.quit() : this.openPicker('', closing)
     // The prompt takes the name of the chat now in front.
     this.drawInput()
     this.renderNow()

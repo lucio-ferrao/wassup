@@ -107,8 +107,9 @@ dark shades.
   ↑/↓, Enter, Tab, → or a click pick one. In a group, `@` lists those who wrote in it, most recent first, narrowed by
   the start of any of their names (`@lem` finds Rita Lemos); the one picked goes in as `@Rita` (the whole name when
   two share the first), and the message goes out mentioning them, as the phone does.
-- Esc closes, in order: the filter, the list, the active tab. Closing the last tab goes back to the list, and Esc
-  there, with no tab left, quits. Ctrl-C quits at once; Ctrl-R redraws the screen.
+- Esc closes, in order: the filter, the list, the active tab. Closing the last tab goes back to the list, and Esc there,
+  with no tab left, quits; with a single chat (`wa <name>`, or a pane in Herdr) closing it quits, the pane with it.
+  Ctrl-C quits at once; Ctrl-R redraws the screen.
 - **Several terminals**: the first process is the server with the WhatsApp connection; the next ones connect to it
   through a socket and are interface only, each with its own tabs. If the server ends, another one takes over.
 - **Single chat**: `wa <name>` opens only that chat, its tab alone under the band, without notices from others; the
