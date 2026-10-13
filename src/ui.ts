@@ -18,6 +18,7 @@ import { emojify, emoticonify, completeEmoji, emoticonAt } from './emoji.js'
 import { enableKittyKeyboard } from './kittykeys.js'
 import { enableBracketedPaste } from './paste.js'
 import { Hearts, reaction, emojiOnly, emojiPng } from './hearts.js'
+import { SixelImages } from './sixel.js'
 import { bigText } from './bigtext.js'
 import { t } from './i18n.js'
 import { parseHex, mix, nearest256, type Rgb } from './rainbow.js'
@@ -455,7 +456,8 @@ export class Ui {
   private viewerBox: blessed.Widgets.BoxElement
   private viewerImg: { d: Decoded; path: string; x: number; y: number; cols: number; rows: number } | undefined
   private mode: ImageMode
-  private kitty: KittyImages | undefined
+  /** The pictures drawn in real pixels, over blank cells: Kitty's placements or sixels; none in half-blocks. */
+  private pics: KittyImages | SixelImages | undefined
   /** Once the terminal stops being resized, the images are sent to it again (see the 'resize' handler). */
   private resendTimer: NodeJS.Timeout | undefined
   /** Half-block images and message bubbles repainted in 24-bit colour, when the terminal takes it. */
@@ -507,7 +509,7 @@ export class Ui {
   /** Lines occupied at the top: the tab bar (1), which doesn't exist in single-chat mode. */
 
   constructor(private wa: Backend, caps: TermCaps, private wanted?: string) {
-    this.mode = detectImageMode(caps.kittyGraphics, inHerdr)
+    this.mode = detectImageMode(caps.kittyGraphics, inHerdr, caps.sixel && !!caps.cellPx)
     ;({ dark: this.dark, selected: this.selectedBg } = theme(caps.bg))
     // WhatsApp Web's bubbles: on a dark theme #005c4b mine and #202c33 theirs, on a light one #d9fdd3 and #ffffff.
     // Mine a step quieter than theirs: darker on a dark theme, lighter on a light one; never the selection's grey,
@@ -527,7 +529,9 @@ export class Ui {
     // the DEC line-drawing set, which SSH apps on phones don't know and show as q, x, l, k.
     if (caps.utf8) (this.screen.program as unknown as { tput: { brokenACS: boolean } }).tput.brokenACS = true
     const program = this.screen.program as unknown as { _write: (s: string) => void }
-    if (this.mode === 'kitty') this.kitty = new KittyImages(s => program._write(s))
+    if (this.mode === 'kitty') this.pics = new KittyImages(s => program._write(s))
+    // Sixels need the cells' size in pixels; forced (WA_IMAGES) where the terminal didn't say, a common one.
+    else if (this.mode === 'sixel') this.pics = new SixelImages(s => program._write(s), caps.cellPx ?? { w: 10, h: 20 }, () => this.scheduleRender())
     // Focus events (DECSET 1004): a terminal that knows them says when this window or pane gains or loses the
     // focus, which decides whether activity here keeps this device online; one that doesn't simply ignores it.
     program._write('\x1b[?1004h')
@@ -703,15 +707,19 @@ export class Ui {
       this.dirtyMessages = true; this.dirtyTabs = true; this.drawInput(); if (this.pickerOpen) this.refreshPicker(); this.scheduleRender()
       // A terminal may drop the images it holds when resized (on Ghostty they were gone for good), and placing them by
       // the ids it was given before then shows nothing: once the resizing stops, they're all let go and sent again.
-      if (!this.kitty) return
+      if (!this.pics) return
       clearTimeout(this.resendTimer)
-      this.resendTimer = setTimeout(() => { this.kitty?.dispose(); this.scheduleRender() }, 200)
+      this.resendTimer = setTimeout(() => { this.pics?.dispose(); this.scheduleRender() }, 200)
     })
     // The painter looks at blessed's buffers just before it draws, when it's known which rows it will redraw.
     const screen = this.screen as unknown as { draw: (start: number, end: number) => void }
     const draw = screen.draw.bind(screen)
-    screen.draw = (start, end) => { this.rgbPaint?.snapshot(this.screenRows('olines'), this.screenRows('lines')); draw(start, end) }
-    this.screen.on('render', () => { this.loadVisibleImages(); this.loadVisibleProfiles(); this.placeImages(); this.paintRgb(); this.paintBigEmoji() })
+    screen.draw = (start, end) => {
+      this.rgbPaint?.snapshot(this.screenRows('olines'), this.screenRows('lines'))
+      if (this.pics instanceof SixelImages) this.pics.snapshot(this.screenRows('olines'), this.screenRows('lines'))
+      draw(start, end)
+    }
+    this.screen.on('render', () => { this.loadVisibleImages(); this.loadVisibleProfiles(); this.placeImages(); this.paintRgb(); this.paintBigEmoji(); this.flushSixels() })
 
     // The mouse wheel scrolls one line per notch (by default blessed jumps half the panel, or two list entries).
     this.msgBox.removeAllListeners('wheeldown')
@@ -1958,7 +1966,7 @@ export class Ui {
         const d = thumbCached(photoFile)
         if (d && !(d instanceof Error)) {
           this.tabPhotos.push({ jid: t.jid, path: `${photoFile}#small`, d, x: x + 2 })
-          photo = `${this.kitty ? '  ' : halfBlocks(d, 2, 1)[0]!}\x1b[48;5;${bg}m `
+          photo = `${this.mode === 'kitty' ? '  ' : halfBlocks(d, 2, 1)[0]!}\x1b[48;5;${bg}m `
         } else {
           photo = '   '
           if (!d && !this.thumbWaiting.has(photoFile)) {
@@ -2325,7 +2333,7 @@ export class Ui {
     if (file && d && !(d instanceof Error) && this.mode !== 'none') {
       // Kitty keeps images by this key: the small copy's own, apart from the big one the popup shows.
       this.pickerAvatars.set(slot, { path: `${file}#small`, d })
-      if (this.kitty) return ['    ', '    ']
+      if (this.pics) return ['    ', '    ']
       const [top, bottom] = halfBlocks(d, 4, 2)
       return [top!, bottom!]
     }
@@ -2603,7 +2611,8 @@ export class Ui {
   }
 
   quit(reason?: string) {
-    this.kitty?.dispose()
+    this.pics?.dispose()
+    if (this.pics instanceof SixelImages) this.pics.end()
     this.disableKittyKeyboard?.()
     this.disablePaste()
     ;(this.screen.program as unknown as { _write: (s: string) => void })._write('\x1b[?1004l')
@@ -3435,7 +3444,7 @@ export class Ui {
         // graphics: two lines of blank cells, four columns for each, the emoji written over them after each frame
         // (paintBigEmoji) or placed there in pictures (placeImages), and the time beside the second. One that can't be
         // drawn in a picture keeps its message as it was.
-        const big = (this.textSizing || this.kitty) && bare ? graphemes(row.text.trim()).filter(g => g.trim()) : []
+        const big = (this.textSizing || this.pics) && bare ? graphemes(row.text.trim()).filter(g => g.trim()) : []
         if (!this.textSizing && big.some(e => this.emojiImage(e) === null)) big.length = 0
         const bigW = big.length * 4, stampW = visibleWidth(stamp)
         const bigged = big.length > 0 && big.length <= 3 && bigW + 2 + stampW <= width
@@ -3602,7 +3611,7 @@ export class Ui {
     const limit = Math.min(mine && stamp ? Math.max(1, width - 2 - visibleWidth(stamp)) : width, preview?.maxCols ?? width)
     // Mine end where the text ends (`textEdge`), short of the message's time, beside the image or not.
     const edge = textEdge ?? (mine && stamp ? Math.max(1, width - 2 - visibleWidth(stamp)) : width)
-    const { cols, rows: fullRows } = this.kitty
+    const { cols, rows: fullRows } = this.pics
       ? cellSize(w, h, Math.min(limit, 60), Math.min(maxRows, 18))
       : cellSize(w, h, Math.min(limit, 40), maxRows, true)
     // A preview still on its way takes one line, not the frame of an image whose size isn't known yet.
@@ -3619,7 +3628,7 @@ export class Ui {
       for (let i = 1; i < rows; i++) push(i === rows - 1 ? blank + tail : '', row)
       return !!tail
     }
-    if (this.kitty) {
+    if (this.pics) {
       images.push({ row, origLine: lines.length, cols, rows, d, pad, path: path!, src: preview?.src })
       for (let i = 0; i < rows; i++) push(i === rows - 1 ? blank + tail : '', row)
     } else {
@@ -3783,7 +3792,7 @@ export class Ui {
     const top = Math.max(0, Math.floor((ih - rows - below) / 2))
     const left = Math.floor((iw - cols) / 2)
     const block = Math.max(0, ...text.map(visibleWidth)), indent = ' '.repeat(Math.max(0, Math.floor((iw - block) / 2)))
-    const picture = this.kitty ? Array.from({ length: rows }, () => '') : halfBlocks(d, cols, rows).map(l => ' '.repeat(left) + l)
+    const picture = this.pics ? Array.from({ length: rows }, () => '') : halfBlocks(d, cols, rows).map(l => ' '.repeat(left) + l)
     box.setContent([...Array.from({ length: top }, () => ''), ...picture, ...(text.length ? ['', ...text.map(l => indent + l)] : [])].join('\n'))
     this.viewerImg = { d, path, x: 2 + 1 + left, y: 1 + 1 + top, cols, rows }
   }
@@ -3852,15 +3861,16 @@ export class Ui {
 
   /** After each blessed frame: re-places the visible Kitty images in the messages panel. */
   private placeImages() {
-    if (!this.kitty) return
-    this.kitty.clear()
+    if (!this.pics) return
+    this.pics.clear()
     const v = this.viewerImg
-    if (v) return this.kitty.place(v.path, v.d, v.x + 1, v.y + 1, v.cols, v.rows)
-    // The chats' photos in their tabs, before the names.
-    for (const tp of this.tabPhotos) this.kitty.place(tp.path, tp.d, num(this.tabsBar.aleft) + tp.x + 1, num(this.tabsBar.atop) + 1, 2, 1)
+    if (v) return this.pics.place(v.path, v.d, v.x + 1, v.y + 1, v.cols, v.rows)
+    // The chats' photos in their tabs, before the names; with sixels in half-blocks, as on the screen's last row a
+    // picture would scroll it.
+    if (this.pics instanceof KittyImages) for (const tp of this.tabPhotos) this.pics.place(tp.path, tp.d, num(this.tabsBar.aleft) + tp.x + 1, num(this.tabsBar.atop) + 1, 2, 1)
     // With the list open, the pictures of the chats whose two rows are in view.
     if (this.pickerOpen) {
-      for (const a of this.visibleAvatars()) this.kitty.place(a.path, a.d, a.x + 1, a.y + 1, 4, 2)
+      for (const a of this.visibleAvatars()) this.pics.place(a.path, a.d, a.x + 1, a.y + 1, 4, 2)
       return
     }
     if (!this.current || this.pickerOpen) return
@@ -3877,7 +3887,7 @@ export class Ui {
       const visTop = Math.max(top, base), visBottom = Math.min(bottom, base + innerH)
       if (visTop >= visBottom) continue
       const row = num(this.msgBox.atop) + num(this.msgBox.itop) + (visTop - base) + 1
-      this.kitty.place(img.path, img.d, col + img.pad, row, img.cols, visBottom - visTop, (visTop - top) / img.rows, (visBottom - top) / img.rows)
+      this.pics.place(img.path, img.d, col + img.pad, row, img.cols, visBottom - visTop, (visTop - top) / img.rows, (visBottom - top) / img.rows)
     }
     // Emoji on their own twice their size, where the terminal doesn't draw text bigger itself: each in its picture,
     // four cells by two, once both their lines are in view.
@@ -3886,7 +3896,7 @@ export class Ui {
       const top = clines.ftor[b.line]?.[0]
       if (top == null || top < base || top + 1 >= base + innerH) continue
       const row = num(this.msgBox.atop) + num(this.msgBox.itop) + (top - base) + 1
-      b.emoji.forEach((e, k) => { const d = this.emojiImage(e); if (d) this.kitty!.place(`emoji:${e}`, d, col + b.col + 4 * k, row, 4, 2) })
+      b.emoji.forEach((e, k) => { const d = this.emojiImage(e); if (d) this.pics!.place(`emoji:${e}`, d, col + b.col + 4 * k, row, 4, 2) })
     }
   }
 
@@ -3959,6 +3969,13 @@ export class Ui {
     if (clear || out) (this.screen.program as unknown as { _write: (s: string) => void })._write(`\x1b7${clear}\x1b[0m${out}\x1b[0m\x1b8`)
   }
 
+  /** After each frame, with sixels: the pictures placed (placeImages) drawn over their cells, last of all (sixel.ts). */
+  private flushSixels() {
+    if (!(this.pics instanceof SixelImages)) return
+    const codeAttr = (this.screen as unknown as { codeAttr: (attr: number) => string }).codeAttr.bind(this.screen)
+    this.pics.flush(this.screenRows('lines'), this.screenRows('olines'), codeAttr)
+  }
+
   /** blessed's frame buffers: `lines` is the frame being built, `olines` the one last drawn to the terminal. */
   private screenRows(which: 'lines' | 'olines'): ([number, string][] | undefined)[] {
     return (this.screen as unknown as Record<string, ([number, string][] | undefined)[]>)[which] ?? []
@@ -4019,7 +4036,7 @@ export class Ui {
       }
     }
     // The tabs' photos, in half-blocks.
-    for (const tp of this.mode === 'blocks' ? this.tabPhotos : []) pictureRow(blockGrid(tp.d, 2, 1), 2, 0, num(this.tabsBar.aleft) + tp.x, num(this.tabsBar.atop))
+    for (const tp of this.mode === 'blocks' || this.mode === 'sixel' ? this.tabPhotos : []) pictureRow(blockGrid(tp.d, 2, 1), 2, 0, num(this.tabsBar.aleft) + tp.x, num(this.tabsBar.atop))
     // The popup's picture, over the panel.
     const v = this.mode === 'blocks' ? this.viewerImg : undefined
     if (v) {

@@ -4,6 +4,7 @@ import { t } from './i18n.js'
 import { Wa, type WaEvents } from './wa.js'
 import { Ui } from './ui.js'
 import { probeTerminal } from './term.js'
+import { loadSharp } from './image.js'
 import { IpcServer, RemoteWa } from './ipc.js'
 import type { Backend } from './backend.js'
 import type { MessageRow } from './db.js'
@@ -84,6 +85,8 @@ class BackendProxy extends EventEmitter<WaEvents> implements Backend {
 }
 
 const caps = await probeTerminal()
+// Sixels are encoded with sharp: the image mode is only sixel when it's there (detectImageMode).
+if (caps.sixel) await loadSharp()
 const backend = new BackendProxy()
 new Ui(backend, caps, process.argv.slice(2).join(' ').trim() || undefined)
 await backend.elect()

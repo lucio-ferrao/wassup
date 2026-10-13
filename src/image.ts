@@ -315,17 +315,18 @@ export function detectRgb(confirmed: boolean): boolean {
   return forced === 'truecolor' ? true : forced === '256' ? false : confirmed
 }
 
-export type ImageMode = 'kitty' | 'blocks' | 'none'
+export type ImageMode = 'kitty' | 'sixel' | 'blocks' | 'none'
 
 /**
- * `WA_IMAGES` forces the mode; otherwise what the terminal answered during probing is used. Inside Herdr the
- * probe reaches the terminal underneath, which says yes to Kitty graphics, but the multiplexer doesn't relay the
- * placements and the images come out as empty space: there it's half-blocks, which show something.
+ * `WA_IMAGES` forces the mode; otherwise what the terminal answered during probing is used: Kitty's graphics, or
+ * else sixels (sixel.ts) where the terminal takes them, said its cells' size and sharp is there to encode them.
+ * Inside Herdr the probe reaches the terminal underneath, which says yes to Kitty graphics, but the multiplexer
+ * doesn't relay the placements and the images come out as empty space: there it's half-blocks, which show something.
  */
-export function detectImageMode(kittyGraphics: boolean, inHerdr = false): ImageMode {
+export function detectImageMode(kittyGraphics: boolean, inHerdr = false, sixel = false): ImageMode {
   const forced = process.env.WA_IMAGES
-  if (forced === 'kitty' || forced === 'blocks' || forced === 'none') return forced
-  return kittyGraphics && !inHerdr ? 'kitty' : 'blocks'
+  if (forced === 'kitty' || forced === 'sixel' || forced === 'blocks' || forced === 'none') return forced
+  return inHerdr ? 'blocks' : kittyGraphics ? 'kitty' : sixel && sharpMod ? 'sixel' : 'blocks'
 }
 
 /**

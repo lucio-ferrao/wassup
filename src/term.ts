@@ -28,9 +28,17 @@ export interface TermCaps {
   flagWidth: number | null
   /** Text drawn bigger by the terminal itself (Kitty's text sizing protocol, OSC 66): a space at twice the size took two cells. */
   textSizing: boolean
+  /** Sixel graphics (foot, among others): announced in the identification's reply (DA1), as its attribute 4. */
+  sixel: boolean
+  /** A cell's size in pixels, asked of a terminal that takes sixels (`CSI 16 t`), to draw a picture to its cells; null if it didn't say. */
+  cellPx: { w: number; h: number } | null
 }
 
 const DA1_RE = /\x1b\[\?[\d;]*c/
+/** The identification's reply, its attributes after the "?": 4 is sixel graphics. */
+const DA1_ATTRS_RE = /\x1b\[\?([\d;]*)c/
+/** Reply to `CSI 16 t`: a cell's height and width in pixels. */
+const CELL_PX_RE = /\x1b\[6;(\d+);(\d+)t/
 const XTVERSION_RE = /\x1bP>\|([^\x1b]*)\x1b\\/
 const KITTY_KBD_RE = /\x1b\[\?\d+u/
 const KITTY_OK_RE = /\x1b_Gi=31;OK\x1b\\/
@@ -99,7 +107,7 @@ function ask(query: string, timeoutMs: number): Promise<string> {
 }
 
 export async function probeTerminal(timeoutMs = 600): Promise<TermCaps> {
-  const caps: TermCaps = { kittyGraphics: false, utf8: localeIsUtf8(), answersQueries: false, version: null, kittyKeyboard: false, fg: null, bg: null, truecolor: false, flagWidth: null, textSizing: false }
+  const caps: TermCaps = { kittyGraphics: false, utf8: localeIsUtf8(), answersQueries: false, version: null, kittyKeyboard: false, fg: null, bg: null, truecolor: false, flagWidth: null, textSizing: false, sixel: false, cellPx: null }
   if (!process.stdin.isTTY || !process.stdout.isTTY) return caps
   // The questions are asked on the alternate screen, left as soon as they're answered: a terminal that doesn't know
   // one may print it as text (Termius prints the DCS ones, "+q524742;5463", "$qm"), and that goes with the screen
@@ -119,6 +127,7 @@ async function askAll(caps: TermCaps, timeoutMs: number) {
   caps.kittyKeyboard = KITTY_KBD_RE.test(first)
   caps.answersQueries = DA1_RE.test(first)
   caps.version = XTVERSION_RE.exec(first)?.[1]?.trim() ?? null
+  caps.sixel = (DA1_ATTRS_RE.exec(first)?.[1] ?? '').split(';').includes('4')
   if (!caps.answersQueries) return
 
   // 2. Default text and background colors (OSC 10 and 11): only for terminals that already answered, and an OSC
@@ -147,7 +156,14 @@ async function askAll(caps: TermCaps, timeoutMs: number) {
     caps.textSizing = col === '3'
   }
 
-  // 6. Kitty graphics query (APC, id 31, 1×1 px image), only for those who identified as capable.
+  // 6. A cell's size in pixels, for a terminal that takes sixels: a picture is drawn to its cells' pixels, which
+  // the terminal doesn't scale as Kitty's graphics do. A CSI the terminal doesn't know goes unanswered.
+  if (caps.sixel) {
+    const px = CELL_PX_RE.exec(await ask('\x1b[16t', timeoutMs))
+    if (px && Number(px[1]) > 0 && Number(px[2]) > 0) caps.cellPx = { w: Number(px[2]), h: Number(px[1]) }
+  }
+
+  // 7. Kitty graphics query (APC, id 31, 1×1 px image), only for those who identified as capable.
   if (caps.version && KITTY_TERMS.test(caps.version)) {
     const second = await ask('\x1b_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\', timeoutMs)
     caps.kittyGraphics = KITTY_OK_RE.test(second)

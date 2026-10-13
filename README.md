@@ -58,7 +58,7 @@ dark shades.
   activating it, with a passing notice over it and the bell; an archived chat stays quiet.
 - **Chats**: `wa` starts on the list, and `/` opens it again, under the app's name with its 👾, most recent at the
   bottom, under a separator for each day, as the messages are (`hoje`, `ontem`, `12 set`), a blank row between chats.
-  Each takes two rows, its photo from WhatsApp on the left of both (four cells by two, real pixels with Kitty,
+  Each takes two rows, its photo from WhatsApp on the left of both (four cells by two, real pixels with Kitty or sixels,
   half-blocks otherwise; its initials on its colour without one). On the first row, the name in its colour, its state's
   emoji (or, while someone types there, 💬 and 💭 taking turns in its place), the unread count in red, 👀 while the person
   is online, and at the right edge the time of the last message, its day being its separator's (with a filter, which has
@@ -85,9 +85,9 @@ dark shades.
   the last of yours that was read) and a link's preview image inside it above the text; the pictures of images,
   stickers, videos and GIFs stay out of it, with their caption in it, and emoji on their own go bare (one to three of
   them twice their size, two lines tall and on the terminal's background: drawn by the terminal itself where it draws
-  text bigger, as Kitty does, asked on startup, or else in pictures where it shows Kitty's graphics, as Ghostty does);
-  each day starts with a separator and a blank line. Mouse wheel or PgUp/PgDn; scrolling past the top brings older
-  messages, first the stored ones and then from the phone, and Ctrl+↓ or Ctrl+PgDn goes back to the latest. An
+  text bigger, as Kitty does, asked on startup, or else in pictures where it shows Kitty's graphics, as Ghostty does, or
+  sixels); each day starts with a separator and a blank line. Mouse wheel or PgUp/PgDn; scrolling past the top brings
+  older messages, first the stored ones and then from the phone, and Ctrl+↓ or Ctrl+PgDn goes back to the latest. An
   attachment not downloaded yet shows `⤓`: a click fetches it into the app's media folder, where it stays, and the mark
   goes; once there, a click opens it with `xdg-open` (`open` on macOS), except images and stickers, which open in a
   popup in the client, as large as it fits, with the local model's description under them, as do link previews; any key
@@ -151,11 +151,14 @@ identifiers made `…` and the parameters left out (`instagram.com/reel/…`, `i
 
 On startup the client asks the terminal what it can do, assuming nothing from `TERM`. In terminals with the Kitty
 graphics protocol (Ghostty, Kitty, WezTerm, Konsole, iTerm2 3.7) images, stickers and thumbnails are shown for real
-inside the panel; elsewhere, and inside Herdr (which doesn't pass the placements through), they are drawn with
-coloured half-blocks, each the average colour of the area it covers: in 24-bit colour when the terminal confirms it
-(XTGETTCAP or DECRQSS; Herdr does), in the 256-colour palette otherwise. `WA_IMAGES=kitty|blocks|none` forces the
-mode, and `WA_COLORS=truecolor|256` the colours. In half-blocks, the selected image, sticker or link preview gets a
-sentence or two from the local model (see below) on what it shows, beside it, or under it when there's no room.
+inside the panel; in those that take sixels instead (foot, among others), announced in their identification, their
+cells' size in pixels asked and `sharp` there to encode them, too, but for the tabs' photos, in half-blocks, as on the
+screen's last row a picture would scroll it; elsewhere, and inside Herdr (which doesn't pass the placements through),
+they are drawn with coloured half-blocks, each the average colour of the area it covers: in 24-bit colour when the
+terminal confirms it (XTGETTCAP or DECRQSS; Herdr does), in the 256-colour palette otherwise.
+`WA_IMAGES=kitty|sixel|blocks|none` forces the mode, and `WA_COLORS=truecolor|256` the colours. In half-blocks, the
+selected image, sticker or link preview gets a sentence or two from the local model (see below) on what it shows, beside
+it, or under it when there's no room.
 
 ## Writing suggestions
 
@@ -207,6 +210,8 @@ History starts with what WhatsApp sends to new devices. `WA_FULL_HISTORY=1` asks
 | `src/links.ts`, `src/clearurls/` | Links cleaned of tracking and shortened; ClearURLs' rules (LGPL-3.0, from [ClearURLs/Rules](https://github.com/ClearURLs/Rules) at 11086f4, 2026-03-25) |
 | `src/fonts/` | Noto Color Emoji (COLRv1, OFL-1.1, from [googlefonts/noto-emoji](https://github.com/googlefonts/noto-emoji) v2.051), for the big emoji where the system has no colour emoji font |
 | `src/image.ts` | Decoding, half-blocks (24-bit or 256 colours), Kitty graphics protocol |
+| `src/sixel.ts` | Sixel graphics: encoding with a palette, and drawing the pictures again where blessed wrote over them |
+| `src/bigtext.ts` | The open chat's name in big letters, in the rounded lines of the wordmark |
 | `src/term.ts` | Probing the terminal's capabilities |
 | `src/kittykeys.ts`, `src/paste.ts` | Kitty keyboard protocol and bracketed paste, read before blessed |
 | `src/herdr.ts` | Agent state, titles and tabs in Herdr |
