@@ -521,7 +521,11 @@ export class Ui {
     this.bgRgb = parseHex(caps.bg) ?? (this.dark ? [0, 0, 0] : [255, 255, 255])
     setTheme(this.dark)
     patchBlessedUnicode(caps.flagWidth === 2, caps.selectorNarrow)
-    this.screen = blessed.screen({ smartCSR: true, fullUnicode: caps.utf8, title: 'wassup', warnings: false })
+    // blessed scrolls a panel as wide as the screen by having the terminal slide its lines (insert and delete line in
+    // a scroll region), but sixels slide with them, out of the panel too, onto the title or the band, where nothing
+    // writes them away: with sixels no panel has clean sides (cleanSides), so its lines are written again instead.
+    this.screen = blessed.screen({ smartCSR: this.mode !== 'sixel', fullUnicode: caps.utf8, title: 'wassup', warnings: false })
+    if (this.mode === 'sixel') (this.screen as unknown as { cleanSides: () => boolean }).cleanSides = () => false
     // blessed takes the colours' count from the terminfo entry, and some it can't read (foot's gave it 8, for 256):
     // every colour then came down to the eight basic ones, the band's green to black. Where the terminal says it has
     // more (term.ts), or confirmed 24-bit colour, blessed is told 256.
