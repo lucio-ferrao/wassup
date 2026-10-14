@@ -1897,9 +1897,10 @@ export class Ui {
     this.dirtyMessages = true
     this.lineMap = []; this.images = []; this.rows = []; this.selected = null
     this.saveTabs()
-    // Closing the last tab goes back to the chat list, on the chat closed, where Esc, with no tab left, quits. In
-    // single-chat mode (Herdr's panes, each a chat, and `wa <name>`) closing the chat quits, its pane with it.
-    if (!this.tabs.length) return this.fixed ? this.quit() : this.openPicker('', closing)
+    // Closing the last tab goes back to the chat list, on the chat closed, where Esc, with no tab left, quits. Started
+    // for a chat (`wa <name>`, as the panes wa opens in Herdr for new messages are) closing it quits, its pane with it,
+    // so those panes don't pile up on the list; started without one, Herdr's own pane included, it's the list.
+    if (!this.tabs.length) return this.wanted ? this.quit() : this.openPicker('', closing)
     // The prompt takes the name of the chat now in front.
     this.drawInput()
     this.renderNow()
