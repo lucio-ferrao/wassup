@@ -32,6 +32,8 @@ export interface TermCaps {
   sixel: boolean
   /** A cell's size in pixels, asked of a terminal that takes sixels (`CSI 16 t`), to draw a picture to its cells; null if it didn't say. */
   cellPx: { w: number; h: number } | null
+  /** Columns the terminal gives a text pictograph with U+FE0F (❤️), measured the same way; null if it didn't say. */
+  selectorWidth: number | null
 }
 
 const DA1_RE = /\x1b\[\?[\d;]*c/
@@ -107,7 +109,7 @@ function ask(query: string, timeoutMs: number): Promise<string> {
 }
 
 export async function probeTerminal(timeoutMs = 600): Promise<TermCaps> {
-  const caps: TermCaps = { kittyGraphics: false, utf8: localeIsUtf8(), answersQueries: false, version: null, kittyKeyboard: false, fg: null, bg: null, truecolor: false, flagWidth: null, textSizing: false, sixel: false, cellPx: null }
+  const caps: TermCaps = { kittyGraphics: false, utf8: localeIsUtf8(), answersQueries: false, version: null, kittyKeyboard: false, fg: null, bg: null, truecolor: false, flagWidth: null, textSizing: false, sixel: false, cellPx: null, selectorWidth: null }
   if (!process.stdin.isTTY || !process.stdout.isTTY) return caps
   // The questions are asked on the alternate screen, left as soon as they're answered: a terminal that doesn't know
   // one may print it as text (Termius prints the DCS ones, "+q524742;5463", "$qm"), and that goes with the screen
@@ -142,11 +144,14 @@ async function askAll(caps: TermCaps, timeoutMs: number) {
   const rgb = await ask(`\x1bP+q${hex('RGB')};${hex('Tc')}\x1b\\\x1b[38;2;1;2;3m\x1bP$qm\x1b\\\x1b[0m`, timeoutMs)
   caps.truecolor = XTGETTCAP_RGB_RE.test(rgb) || DECRQSS_RGB_RE.test(rgb)
 
-  // 4. A flag's width: written at the top left, the cursor's column (CPR) says how many cells it took. Terminals
-  // disagree (one cell per regional indicator, two each, or the pair as one emoji), so it's measured, not assumed.
+  // 4. A flag's width and a "❤️"'s: each written at the top left, the cursor's column (CPR) says how many cells it
+  // took. Terminals disagree (for a flag one cell per regional indicator, two each, or the pair as one emoji; for
+  // "❤️" 1 or 2), so they're measured, not assumed.
   if (caps.utf8) {
-    const col = CPR_RE.exec(await ask('\x1b[H🇵🇹\x1b[6n', timeoutMs))?.[1]
-    if (col) caps.flagWidth = Number(col) - 1
+    const [flag, heart] = [...(await ask('\x1b[H🇵🇹\x1b[6n\x1b[H❤️\x1b[6n', timeoutMs)).matchAll(new RegExp(CPR_RE, 'g'))].map(m => Number(m[1]) - 1)
+    if (flag != null) caps.flagWidth = flag
+    // Only 1 or 2 is a width the screen can follow; anything else is left unknown, as if the terminal hadn't said.
+    if (heart === 1 || heart === 2) caps.selectorWidth = heart
   }
 
   // 5. Text drawn bigger by the terminal (OSC 66): a space at twice the size, written at the top left, takes two

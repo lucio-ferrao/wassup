@@ -5,8 +5,9 @@ import blessed from 'blessed'
  * the terminal draws it with 2 cells, and from there the grid gets misaligned and garbage shows up. Here blessed's
  * `unicode` module is patched to count emoji-presentation characters as width 2, which is what terminals do
  * (wcwidth). Same for a text pictograph followed by the U+FE0F variation selector ("❤️", "✔️"): the selector asks
- * for the emoji form, which the terminal draws with 2 cells; blessed saw it as a width-0 combining character over
- * a width-1 character, and each one left a column of garbage to the right.
+ * for the emoji form, which most terminals draw with 2 cells; blessed saw it as a width-0 combining character over
+ * a width-1 character, and each one left a column of garbage to the right. Those that draw it with 1 (Apple's
+ * Terminal, Termius), measured at startup (term.ts), keep blessed's 1.
  */
 interface BlessedUnicode {
   charWidth: (str: string | number, i?: number) => number
@@ -20,6 +21,8 @@ const VS16 = '\uFE0F'
 
 /** Whether flags are drawn as such, the terminal giving them 2 columns (term.ts), or as `[PT]` (tameEmoji). */
 let realFlags = false
+/** Columns the terminal gives a text pictograph with U+FE0F ("❤️"), measured at startup (term.ts); null if unknown. */
+let selectorWidth: number | null = null
 
 const isRegional = (s: string, i: number) => { const cp = s.codePointAt(i); return cp != null && cp >= 0x1F1E6 && cp <= 0x1F1FF }
 
@@ -31,12 +34,17 @@ function flagTail(s: string, i: number): boolean {
   return n % 2 === 1
 }
 
-/** `flags`: whether the terminal gives a flag 2 columns, so flags are drawn as such. */
-export function patchBlessedUnicode(flags: boolean) {
+/**
+ * `flags`: whether the terminal gives a flag 2 columns, so flags are drawn as such. `selector`: the columns it gives
+ * "❤️" (null if it didn't say, taken as 2).
+ */
+export function patchBlessedUnicode(flags: boolean, selector: number | null) {
   const u = (blessed as unknown as { unicode: BlessedUnicode }).unicode
   if ((u as { _waPatched?: boolean })._waPatched) return
   ;(u as { _waPatched?: boolean })._waPatched = true
   realFlags = flags
+  selectorWidth = selector
+  const wideSelector = selector !== 1
 
   const orig = u.charWidth
   u.charWidth = (str, i) => {
@@ -46,7 +54,7 @@ export function patchBlessedUnicode(flags: boolean) {
     const c = String.fromCodePoint(cp)
     // blessed's renderer merges the U+FE0F into the previous character's cell, so here it comes right after it.
     // Before the Latin-1 shortcut: "©️" and "®️" are pictographs below U+0100, as wide with the selector as any other.
-    if (typeof str !== 'number' && str[at + c.length] === VS16 && PICTOGRAPH.test(c)) return 2
+    if (wideSelector && typeof str !== 'number' && str[at + c.length] === VS16 && PICTOGRAPH.test(c)) return 2
     if (cp <= 0xff) return orig.call(u, str, i)
     // A flag drawn as such has one cell of width 2, the second regional indicator inside the first's (patchRender):
     // the first counts 2, as an emoji, and the second nothing.
@@ -57,9 +65,11 @@ export function patchBlessedUnicode(flags: boolean) {
 
   // chars.all is what parseContent uses to mark the second cell of each wide character. It's rebuilt in `u` mode,
   // with the CJK planes by code point and emoji by property; the U+FE0F stays inside the sequence so the marker
-  // falls after it, and so does a flag's second regional indicator.
+  // falls after it, and so does a flag's second regional indicator. With "❤️" 1 column wide only emoji wide on their
+  // own take the second cell, the selector after them or not.
   const flag = flags ? '\\p{Regional_Indicator}{2}|' : ''
-  u.chars.all = new RegExp(`(${flag}\\p{Extended_Pictographic}\\uFE0F|\\p{Emoji_Presentation}|[\\u{20000}-\\u{2FFFD}\\u{30000}-\\u{3FFFD}]|${u.chars.wide.source})`, 'gu')
+  const selected = wideSelector ? '\\p{Extended_Pictographic}' : '\\p{Emoji_Presentation}'
+  u.chars.all = new RegExp(`(${flag}${selected}\\uFE0F|\\p{Emoji_Presentation}|[\\u{20000}-\\u{2FFFD}\\u{30000}-\\u{3FFFD}]|${u.chars.wide.source})`, 'gu')
   if (flags) patchRender(u)
   patchWrap(u)
 }
@@ -125,11 +135,12 @@ const AMBIGUOUS = /^\p{Extended_Pictographic}️$/u
 const ANGLES: Record<string, boolean> = Object.fromEntries([...'┘┐┌└┼├┤┴┬│─'].map(c => [c, true]))
 
 /**
- * To blessed (see above) "❤️" has width 2, but some terminals, Termius among them, give it 1: the cursor ends up one
- * cell behind where blessed thinks it is, and whatever blessed writes next on the same line, even the space that
- * pads it, lands one column to the left and covers the right half of the emoji. blessed's `draw` is rewritten with
- * a patch: right after one of those emoji the cursor moves, in absolute terms, to the cell blessed assumes, so the
- * cell next to the emoji is never touched, on terminals that measure 1 and on those that measure 2.
+ * When the terminal didn't say how wide "❤️" is, blessed takes 2 (see above), but some terminals give it 1: the
+ * cursor ends up one cell behind where blessed thinks it is, and whatever blessed writes next on the same line, even
+ * the space that pads it, lands one column to the left and covers the right half of the emoji. blessed's `draw` is
+ * rewritten with a patch: right after one of those emoji the cursor moves, in absolute terms, to the cell blessed
+ * assumes, so the cell next to the emoji is never touched, on terminals that measure 1 and on those that measure 2.
+ * With the width measured blessed already counts what the terminal draws, and the cursor isn't moved.
  *
  * The same patch writes a space for the marker of a wide character's second cell (U+0003) when that cell comes out
  * on its own: something drawn over the first cell (the big emoji rising, hearts.ts) left the marker without its
@@ -145,5 +156,5 @@ export function patchBlessedDraw() {
   if (!src.includes(marker)) throw new Error('blessed: draw changed; the ambiguous-width emoji patch does not apply')
   const patched = src.replace(marker, 'out += ch === \'\\x03\' ? \' \' : ch;\n      if (ambiguous(ch)) out += this.tput.cup(y, x + 1);\n      attr = data;')
   const u = (blessed as unknown as { unicode: BlessedUnicode }).unicode
-  Screen.prototype.draw = new Function('unicode', 'angles', 'ambiguous', `return ${patched}`)(u, ANGLES, (ch: string) => AMBIGUOUS.test(ch))
+  Screen.prototype.draw = new Function('unicode', 'angles', 'ambiguous', `return ${patched}`)(u, ANGLES, (ch: string) => selectorWidth == null && AMBIGUOUS.test(ch))
 }
