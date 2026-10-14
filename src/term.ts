@@ -32,11 +32,21 @@ export interface TermCaps {
   sixel: boolean
   /** A cell's size in pixels, asked of a terminal that takes sixels (`CSI 16 t`), to draw a picture to its cells; null if it didn't say. */
   cellPx: { w: number; h: number } | null
-  /** Columns the terminal gives a text pictograph with U+FE0F (❤️), measured the same way; null if it didn't say. */
-  selectorWidth: number | null
+  /**
+   * The text pictographs the terminal draws 1 cell wide with U+FE0F ("❤️" in Apple's Terminal), each measured the
+   * same way (SELECTABLE); the others it draws with 2. Null if it didn't say.
+   */
+  selectorNarrow: string | null
 }
 
 const DA1_RE = /\x1b\[\?[\d;]*c/
+/**
+ * The pictographs shown as text by default that U+FE0F turns into emoji ("❤️", "✔️", "☀️"): the ones to measure,
+ * all below U+3300 or among the emoji from U+1F000.
+ */
+const SELECTABLE = [...Array.from({ length: 0x3300 }, (_, cp) => cp), ...Array.from({ length: 0xB00 }, (_, i) => 0x1F000 + i)]
+  .map(cp => String.fromCodePoint(cp))
+  .filter(c => /\p{Extended_Pictographic}/u.test(c) && /\p{Emoji}/u.test(c) && !/\p{Emoji_Presentation}/u.test(c))
 /** The identification's reply, its attributes after the "?": 4 is sixel graphics. */
 const DA1_ATTRS_RE = /\x1b\[\?([\d;]*)c/
 /** Reply to `CSI 16 t`: a cell's height and width in pixels. */
@@ -109,7 +119,7 @@ function ask(query: string, timeoutMs: number): Promise<string> {
 }
 
 export async function probeTerminal(timeoutMs = 600): Promise<TermCaps> {
-  const caps: TermCaps = { kittyGraphics: false, utf8: localeIsUtf8(), answersQueries: false, version: null, kittyKeyboard: false, fg: null, bg: null, truecolor: false, flagWidth: null, textSizing: false, sixel: false, cellPx: null, selectorWidth: null }
+  const caps: TermCaps = { kittyGraphics: false, utf8: localeIsUtf8(), answersQueries: false, version: null, kittyKeyboard: false, fg: null, bg: null, truecolor: false, flagWidth: null, textSizing: false, sixel: false, cellPx: null, selectorNarrow: null }
   if (!process.stdin.isTTY || !process.stdout.isTTY) return caps
   // The questions are asked on the alternate screen, left as soon as they're answered: a terminal that doesn't know
   // one may print it as text (Termius prints the DCS ones, "+q524742;5463", "$qm"), and that goes with the screen
@@ -144,14 +154,15 @@ async function askAll(caps: TermCaps, timeoutMs: number) {
   const rgb = await ask(`\x1bP+q${hex('RGB')};${hex('Tc')}\x1b\\\x1b[38;2;1;2;3m\x1bP$qm\x1b\\\x1b[0m`, timeoutMs)
   caps.truecolor = XTGETTCAP_RGB_RE.test(rgb) || DECRQSS_RGB_RE.test(rgb)
 
-  // 4. A flag's width and a "❤️"'s: each written at the top left, the cursor's column (CPR) says how many cells it
-  // took. Terminals disagree (for a flag one cell per regional indicator, two each, or the pair as one emoji; for
-  // "❤️" 1 or 2), so they're measured, not assumed.
+  // 4. A flag's width and each text pictograph's with U+FE0F ("❤️"): each written at the top left, the cursor's
+  // column (CPR) says how many cells it took, all asked at once. Terminals disagree (for a flag one cell per regional
+  // indicator, two each, or the pair as one emoji; for "❤️" 1 or 2, and not always the same for every symbol), so
+  // they're measured, not assumed. Without an answer for each, the symbols' widths are left unknown.
   if (caps.utf8) {
-    const [flag, heart] = [...(await ask('\x1b[H🇵🇹\x1b[6n\x1b[H❤️\x1b[6n', timeoutMs)).matchAll(new RegExp(CPR_RE, 'g'))].map(m => Number(m[1]) - 1)
+    const asked = ['🇵🇹', ...SELECTABLE.map(c => `${c}\uFE0F`)].map(s => `\x1b[H${s}\x1b[6n`).join('')
+    const [flag, ...widths] = [...(await ask(asked, timeoutMs)).matchAll(new RegExp(CPR_RE, 'g'))].map(m => Number(m[1]) - 1)
     if (flag != null) caps.flagWidth = flag
-    // Only 1 or 2 is a width the screen can follow; anything else is left unknown, as if the terminal hadn't said.
-    if (heart === 1 || heart === 2) caps.selectorWidth = heart
+    if (widths.length === SELECTABLE.length) caps.selectorNarrow = SELECTABLE.filter((_, i) => widths[i] === 1).join('')
   }
 
   // 5. Text drawn bigger by the terminal (OSC 66): a space at twice the size, written at the top left, takes two

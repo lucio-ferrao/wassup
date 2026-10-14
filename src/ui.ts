@@ -520,7 +520,7 @@ export class Ui {
     this.fgRgb = parseHex(caps.fg) ?? (this.dark ? [192, 192, 192] : [48, 48, 48])
     this.bgRgb = parseHex(caps.bg) ?? (this.dark ? [0, 0, 0] : [255, 255, 255])
     setTheme(this.dark)
-    patchBlessedUnicode(caps.flagWidth === 2, caps.selectorWidth)
+    patchBlessedUnicode(caps.flagWidth === 2, caps.selectorNarrow)
     this.screen = blessed.screen({ smartCSR: true, fullUnicode: caps.utf8, title: 'wassup', warnings: false })
     // Each patch rebuilds `draw` from the source of the one before, so the italic one, which only knows blessed's own
     // variables, goes first; the wide-emoji one then adds its own on top.
