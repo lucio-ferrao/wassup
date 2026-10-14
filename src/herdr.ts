@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process'
 import { connect } from 'node:net'
 import { fileURLToPath } from 'node:url'
 import { logger } from './log.js'
@@ -11,7 +12,32 @@ import { logger } from './log.js'
 export type HerdrState = 'idle' | 'working' | 'blocked' | 'unknown'
 
 const env = process.env
-export const inHerdr = env.HERDR_ENV === '1' && !!env.HERDR_SOCKET_PATH && !!env.HERDR_PANE_ID && !!env.HERDR_TAB_ID
+
+/**
+ * Whether this process runs in a Herdr pane itself, not in a terminal started from one: foot opened from a shell in
+ * Herdr inherits its HERDR_* variables, and took the images for Herdr's half-blocks. The first ancestor on another
+ * terminal is the program that made this one, Herdr in a pane and foot in foot. Without `ps`, the variables decide.
+ */
+function inHerdrPane(): boolean {
+  try {
+    const info = (pid: number) => {
+      const [ppid, tty, ...comm] = execFileSync('ps', ['-o', 'ppid=,tty=,comm=', '-p', String(pid)], { encoding: 'utf8' }).trim().split(/\s+/)
+      return { ppid: Number(ppid), tty, comm: comm.join(' ') }
+    }
+    let p = info(process.pid)
+    const own = p.tty
+    for (let i = 0; i < 20 && p.ppid > 1; i++) {
+      const parent = info(p.ppid)
+      if (parent.tty !== own) return /herdr/i.test(parent.comm)
+      p = parent
+    }
+    return false
+  } catch {
+    return true
+  }
+}
+
+export const inHerdr = env.HERDR_ENV === '1' && !!env.HERDR_SOCKET_PATH && !!env.HERDR_PANE_ID && !!env.HERDR_TAB_ID && inHerdrPane()
 
 // Herdr orders requests from the same origin by seq; two in the same millisecond can't tie.
 let seq = Date.now()
