@@ -522,6 +522,16 @@ export class Ui {
     setTheme(this.dark)
     patchBlessedUnicode(caps.flagWidth === 2, caps.selectorNarrow)
     this.screen = blessed.screen({ smartCSR: true, fullUnicode: caps.utf8, title: 'wassup', warnings: false })
+    // Mouse with clicks, wheel and motion while a button is held (1000+1002) in SGR encoding (1006), instead of the
+    // set blessed enables for xterm (1000/1002/1003/1005): any-motion reporting (1003) and UTF-8 encoding (1005)
+    // confuse SSH apps on phones like Termius, which with 1000+1006 send taps as clicks, and foot warns it doesn't
+    // know 1005. Any-motion reporting, which the hover needs, is only asked of terminals that identified themselves
+    // (XTVERSION): desktop ones, not those apps. These are the modes blessed turns on itself, with the first element
+    // that takes clicks, so its own set is never sent; it turns off whatever was enabled on exit.
+    this.anyMotion = caps.version != null
+    const modes = { vt200Mouse: true, cellMotion: true, allMotion: this.anyMotion, sgrMouse: true }
+    const mice = this.screen.program as unknown as { enableMouse: () => void; setMouse: (o: Record<string, boolean>, enable: boolean) => void }
+    mice.enableMouse = () => mice.setMouse(modes, true)
     // Each patch rebuilds `draw` from the source of the one before, so the italic one, which only knows blessed's own
     // variables, goes first; the wide-emoji one then adds its own on top.
     patchBlessedItalic(this.screen); patchBlessedDraw()
@@ -658,15 +668,7 @@ export class Ui {
     const overlay = blessed.box({ parent: this.screen, top: 0, left: 0, width: 1, height: 1, hidden: true })
     overlay.render = (() => { this.drawTextSel(); this.drawQuick(); return undefined }) as unknown as typeof overlay.render
 
-    // Mouse with clicks, wheel and motion while a button is held (1000+1002) in SGR encoding (1006), instead of the
-    // set blessed enables for xterm (1000/1002/1003/1005): any-motion reporting (1003) and UTF-8 encoding (1005)
-    // confuse SSH apps on phones like Termius, which with 1000+1006 send taps as clicks. Any-motion reporting, which
-    // the hover needs, is only asked of terminals that identified themselves (XTVERSION): desktop ones, not those
-    // apps. blessed turns off whatever was enabled on exit.
-    this.anyMotion = caps.version != null
-    const mouse = this.screen.program as unknown as { disableMouse: () => void; setMouse: (o: Record<string, boolean>, enable: boolean) => void; _bindMouse: (s: string, buf: Buffer) => void }
-    mouse.disableMouse()
-    mouse.setMouse({ vt200Mouse: true, cellMotion: true, allMotion: this.anyMotion, sgrMouse: true }, true)
+    const mouse = this.screen.program as unknown as { setMouse: (o: Record<string, boolean>, enable: boolean) => void; _bindMouse: (s: string, buf: Buffer) => void }
     // blessed only reads the first mouse sequence in each byte packet, and terminals send the button press and
     // release (or two wheel notches) in the same packet: the release was lost and there was never a click. The
     // packet is split into individual SGR sequences before blessed reads them.

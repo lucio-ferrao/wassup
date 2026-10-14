@@ -167,7 +167,8 @@ async function askAll(caps: TermCaps, timeoutMs: number) {
 
   // 5. Text drawn bigger by the terminal (OSC 66): a space at twice the size, written at the top left, takes two
   // cells, which the cursor's column says; a terminal that doesn't know the OSC swallows it, the cursor unmoved.
-  if (caps.utf8) {
+  // Only asked of Kitty, the one that draws it: foot knows OSC 66 for widths and warns about the size it doesn't.
+  if (caps.utf8 && caps.version && /kitty/i.test(caps.version)) {
     const col = CPR_RE.exec(await ask('\x1b[H\x1b]66;s=2; \x1b\\\x1b[6n', timeoutMs))?.[1]
     caps.textSizing = col === '3'
   }
