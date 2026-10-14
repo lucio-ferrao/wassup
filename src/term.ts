@@ -28,6 +28,8 @@ export interface TermCaps {
   flagWidth: number | null
   /** Text drawn bigger by the terminal itself (Kitty's text sizing protocol, OSC 66): a space at twice the size took two cells. */
   textSizing: boolean
+  /** Colours the terminal says it has (XTGETTCAP `colors`), whatever its terminfo entry says; null if it didn't say. */
+  colors: number | null
   /** Sixel graphics (foot, among others): announced in the identification's reply (DA1), as its attribute 4. */
   sixel: boolean
   /** A cell's size in pixels, asked of a terminal that takes sixels (`CSI 16 t`), to draw a picture to its cells; null if it didn't say. */
@@ -57,6 +59,8 @@ const KITTY_OK_RE = /\x1b_Gi=31;OK\x1b\\/
 /** Cursor position report (`CSI row ; column R`). */
 const CPR_RE = /\x1b\[\d+;(\d+)R/
 /** XTGETTCAP reply confirming RGB or Tc (`DCS 1 + r <hex name>`): `0 + r` would mean the terminal doesn't have it. */
+/** XTGETTCAP reply with the colours' count, the value in hex like the name ("colors" is 636f6c6f7273). */
+const XTGETTCAP_COLORS_RE = /\x1bP1\+r636f6c6f7273=([0-9a-f]+)/i
 const XTGETTCAP_RGB_RE = /\x1bP1\+r(?:524742|5463)/i
 /** DECRQSS reply carrying the 24-bit colour back, in any of the forms terminals write it (`38;2;1;2;3`, `38:2::1:2:3`). */
 const DECRQSS_RGB_RE = /\x1bP1\$r[^\x1b]*38[:;]2[:;]+1[:;]2[:;]3/
@@ -119,7 +123,7 @@ function ask(query: string, timeoutMs: number): Promise<string> {
 }
 
 export async function probeTerminal(timeoutMs = 600): Promise<TermCaps> {
-  const caps: TermCaps = { kittyGraphics: false, utf8: localeIsUtf8(), answersQueries: false, version: null, kittyKeyboard: false, fg: null, bg: null, truecolor: false, flagWidth: null, textSizing: false, sixel: false, cellPx: null, selectorNarrow: null }
+  const caps: TermCaps = { kittyGraphics: false, utf8: localeIsUtf8(), answersQueries: false, version: null, kittyKeyboard: false, fg: null, bg: null, truecolor: false, flagWidth: null, colors: null, textSizing: false, sixel: false, cellPx: null, selectorNarrow: null }
   if (!process.stdin.isTTY || !process.stdout.isTTY) return caps
   // The questions are asked on the alternate screen, left as soon as they're answered: a terminal that doesn't know
   // one may print it as text (Termius prints the DCS ones, "+q524742;5463", "$qm"), and that goes with the screen
@@ -149,10 +153,14 @@ async function askAll(caps: TermCaps, timeoutMs: number) {
 
   // 3. 24-bit colour, asked of the terminal itself: XTGETTCAP for the RGB and Tc terminfo capabilities (Herdr,
   // which doesn't answer DECRQSS, confirms both), and DECRQSS on an SGR set to a 24-bit colour, for terminals that
-  // answer that one instead. Both are DCS strings, which most terminals that don't know them swallow.
+  // answer that one instead. Both are DCS strings, which most terminals that don't know them swallow. XTGETTCAP
+  // asks the colours' count too, last, as some stop at the first name they don't know: blessed reads it from the
+  // terminfo entry, and some it can't read (foot's gave it 8).
   const hex = (s: string) => Buffer.from(s).toString('hex')
-  const rgb = await ask(`\x1bP+q${hex('RGB')};${hex('Tc')}\x1b\\\x1b[38;2;1;2;3m\x1bP$qm\x1b\\\x1b[0m`, timeoutMs)
+  const rgb = await ask(`\x1bP+q${hex('RGB')};${hex('Tc')};${hex('colors')}\x1b\\\x1b[38;2;1;2;3m\x1bP$qm\x1b\\\x1b[0m`, timeoutMs)
   caps.truecolor = XTGETTCAP_RGB_RE.test(rgb) || DECRQSS_RGB_RE.test(rgb)
+  const colors = Number(Buffer.from(XTGETTCAP_COLORS_RE.exec(rgb)?.[1] ?? '', 'hex').toString())
+  if (colors > 0) caps.colors = colors
 
   // 4. A flag's width and each text pictograph's with U+FE0F ("❤️"): each written at the top left, the cursor's
   // column (CPR) says how many cells it took, all asked at once. Terminals disagree (for a flag one cell per regional

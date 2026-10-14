@@ -522,6 +522,12 @@ export class Ui {
     setTheme(this.dark)
     patchBlessedUnicode(caps.flagWidth === 2, caps.selectorNarrow)
     this.screen = blessed.screen({ smartCSR: true, fullUnicode: caps.utf8, title: 'wassup', warnings: false })
+    // blessed takes the colours' count from the terminfo entry, and some it can't read (foot's gave it 8, for 256):
+    // every colour then came down to the eight basic ones, the band's green to black. Where the terminal says it has
+    // more (term.ts), or confirmed 24-bit colour, blessed is told 256.
+    const tput = (this.screen.program as unknown as { tput: { colors: number; numbers: { max_colors?: number } } }).tput
+    const told = Math.min(256, Math.max(caps.colors ?? 0, caps.truecolor ? 256 : 0))
+    if (tput.colors < told) tput.colors = tput.numbers.max_colors = told
     // Mouse with clicks, wheel and motion while a button is held (1000+1002) in SGR encoding (1006), instead of the
     // set blessed enables for xterm (1000/1002/1003/1005): any-motion reporting (1003) and UTF-8 encoding (1005)
     // confuse SSH apps on phones like Termius, which with 1000+1006 send taps as clicks, and foot warns it doesn't
