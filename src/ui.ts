@@ -321,11 +321,13 @@ export class Ui {
   /** The photos whose small copy is being decoded (loadVisibleProfiles). */
   private thumbWaiting = new Set<string>()
   /**
-   * The chats' photos in their tabs, before the names, two cells by one, placed with Kitty (placeImages) or drawn in
-   * half-blocks (repainted in their exact colours by paintRgb): each one's chat, small copy's key, decoded image and
-   * column on the tab bar.
+   * The open chat's photo at the top left, before its name, square and as tall as the name (drawChatHead): its key,
+   * the decoded picture and its cells; placed with Kitty or sixels (placeImages), or drawn in half-blocks and
+   * repainted in their exact colours (paintRgb).
    */
-  private tabPhotos: { jid: string; path: string; d: Decoded; x: number }[] = []
+  private headPhoto: { jid: string; path: string; d: Decoded; cols: number; rows: number } | undefined
+  /** The columns the open chat's name takes at the top (inside the head's padding), which a click on goes back to the chat list. */
+  private headName: { from: number; to: number } | undefined
   /** The last press on the list, and whether it was on a chat's photo (see the list's 'select'). */
   private pickerPress: { at: number; photo: boolean } | undefined
   private pickerFound: { query: string; rows: MessageRow[] } | undefined
@@ -595,7 +597,7 @@ export class Ui {
       // one unit too long); left to itself it would still cut a line that reaches the edge at its last word.
       tags: true, wrap: false, scrollable: true, alwaysScroll: true, mouse: true,
     }) as ClinesBox
-    this.chatHead = blessed.box({ parent: this.screen, top: 0, left: 0, right: 0, height: 1, padding: { left: 1 }, tags: true, wrap: false, hidden: true })
+    this.chatHead = blessed.box({ parent: this.screen, top: 0, left: 0, right: 0, height: 1, padding: { left: 1 }, tags: true, wrap: false, hidden: true, mouse: true })
     this.input = blessed.box({
       parent: this.screen, top: `100%-${this.inputRows + 1}`, left: 0, right: 0, height: this.inputRows,
       // Each line is laid out to its width already, the bubble's to the end: blessed is left to wrap nothing.
@@ -667,7 +669,7 @@ export class Ui {
     // blessed gives the keyboard to whatever is clicked; here it goes only where setFocus puts it. The chat list's
     // arrows work only while the list holds it, and a click on the popup that closes it, on the prompt or on the bar
     // took it away from the list for good.
-    for (const box of [this.tabsBar, this.msgBox, this.input, this.suggest, this.ghostBox, this.fixBox, this.viewerBox]) {
+    for (const box of [this.tabsBar, this.chatHead, this.msgBox, this.input, this.suggest, this.ghostBox, this.fixBox, this.viewerBox]) {
       (box as unknown as { options: { autoFocus?: boolean } }).options.autoFocus = false
     }
 
@@ -777,8 +779,15 @@ export class Ui {
       this.lightPickerRows(i)
     })
 
-    // A click on another tab goes to that chat (on the active one, with the chat list open, back to it); on a tab's
-    // photo, the photo opens large; on the ✖ a tab shows under the pointer, it closes.
+    // A click on the open chat's photo, at the top left, opens it large; one on its name goes back to the chat list,
+    // as "/" does, the tab left open.
+    this.chatHead.on('click', (data: { x: number }) => {
+      const hp = this.headPhoto, name = this.headName, x = data.x - num(this.chatHead.aleft) - num(this.chatHead.ileft)
+      if (hp && x >= 0 && x < hp.cols) return this.openPhoto(hp.jid)
+      if (name && x >= name.from && x < name.to) this.openPicker()
+    })
+    // A click on another tab goes to that chat (on the active one, with the chat list open, back to it); on the ✖ a
+    // tab shows under the pointer, it closes.
     this.tabsBar.on('click', (data: { x: number; y: number }) => {
       const x = data.x - num(this.tabsBar.aleft)
       const seg = this.segments.find(s => x >= s.x0 && x < s.x1)
@@ -791,8 +800,6 @@ export class Ui {
         if (close.index < 0) return this.tabs.length ? this.closePicker() : this.quit()
         return this.closeTab(close.index)
       }
-      const tp = this.tabPhotos.find(p => x >= p.x && x < p.x + 2)
-      if (tp) return this.openPhoto(tp.jid)
       if (!this.fixed && (this.pickerOpen || seg.index !== this.active)) this.activateTab(seg.index)
     })
     // Clicking a message's "☺" opens its quick reactions, clicking an attachment opens it; outside messages a click
@@ -1909,14 +1916,13 @@ export class Ui {
   }
 
   /**
-   * The tab bar, under the input: one tab per open chat (in single-chat mode, that one), its photo (tabPhotos), its
-   * name and its state's emoji (moodOf), or in its place two emoji taking turns while someone types there, or 🔔
-   * with messages unread. The active one on my bubbles' green, as the band it's the label of, its name in its colour,
-   * bold; the others on the other side's grey, quieter. The one under the pointer shows a faint ✖ in its state's
-   * place, which closes it, as Esc closes the active one. With the chat list open, its own tab comes first and is the
-   * active one, "wassup" (or "procurar", searching them all), its ✖ closing the list. Names
-   * shorten for the tabs to fit, down to 6 characters. Against the right edge, a passing message or the connection's
-   * state when it needs attention.
+   * The tab bar, under the input: one tab per open chat (in single-chat mode, that one), its name and its state's emoji
+   * (moodOf), or in its place two emoji taking turns while someone types there, or 🔔 with messages unread. The active
+   * one on my bubbles' green, as the band it's the label of, its name in its colour, bold; the others on the other
+   * side's grey, quieter. The one under the pointer shows a faint ✖ in its state's place, which closes it, as Esc
+   * closes the active one. With the chat list open, its own tab comes first and is the active one, "wassup" (or
+   * "procurar", searching them all), its ✖ closing the list. Names shorten for the tabs to fit, down to 6 characters.
+   * Against the right edge, a passing message or the connection's state when it needs attention.
    */
   private drawTabs() {
     const width = num(this.tabsBar.width)
@@ -1940,14 +1946,7 @@ export class Ui {
     const ownClose = !!own && this.tabHover === -1
     const ownW = own ? strWidth(own) + 3 + 3 : 0
     // Each tab: a cell either side of its text, and a cell between tabs; the first starts where the band does.
-    // Each one's photo, before its name, once it has one (its cells kept while it's decoded, so nothing moves).
-    const photoOf = (jid: string) => {
-      const avatar = this.mode === 'none' ? undefined : (this.profiles.get(jid) ?? store.getProfile(jid))?.avatar
-      return avatar ? path.join(mediaDir(jid), avatar) : null
-    }
-    const photos = new Map(tabs.map(t => [t.i, photoOf(t.jid)]))
-    this.tabPhotos = []
-    const overhead = (t: (typeof tabs)[number]) => 2 + strWidth(t.mood) + 1 + (photos.get(t.i) ? 3 : 0)
+    const overhead = (t: (typeof tabs)[number]) => 2 + strWidth(t.mood) + 1
     let nameW = Math.max(...tabs.map(t => strWidth(t.name)), 0)
     const fits = (w: number) => 1 + ownW + tabs.reduce((sum, t) => sum + Math.min(strWidth(t.name), w) + overhead(t), 0) <= width
     while (nameW > 6 && !fits(nameW)) nameW--
@@ -1971,28 +1970,11 @@ export class Ui {
       const color = active ? colorFor(t.jid) : FG.tab
       const lead = ` {${bg}-bg} `
       const label = active ? `{bold}${esc(name)}{/bold}` : esc(name)
-      // The photo, two cells and one of gap after the tab's spare cell: blank where Kitty places it, half-blocks
-      // otherwise (their full reset at the end, the tab's background opened again after it).
-      let photo = ''
-      const photoFile = photos.get(t.i)
-      if (photoFile) {
-        const d = thumbCached(photoFile)
-        if (d && !(d instanceof Error)) {
-          this.tabPhotos.push({ jid: t.jid, path: `${photoFile}#small`, d, x: x + 2 })
-          photo = `${this.mode === 'kitty' ? '  ' : halfBlocks(d, 2, 1)[0]!}\x1b[48;5;${bg}m `
-        } else {
-          photo = '   '
-          if (!d && !this.thumbWaiting.has(photoFile)) {
-            this.thumbWaiting.add(photoFile)
-            decodeThumb(photoFile).then(() => { this.thumbWaiting.delete(photoFile); this.dirtyTabs = true; this.scheduleRender() })
-          }
-        }
-      }
-      const w = 2 + (photo ? 3 : 0) + strWidth(name) + strWidth(t.mood)
+      const w = 2 + strWidth(name) + strWidth(t.mood)
       this.segments.push({ x0: x + 1, x1: x + 1 + w, index: t.i })
-      if (t.closing) this.tabCloses.push({ x: x + 2 + (photo ? 3 : 0) + strWidth(name) + 1, index: t.i })
+      if (t.closing) this.tabCloses.push({ x: x + 2 + strWidth(name) + 1, index: t.i })
       const mood = t.closing ? t.mood.replace('✖', dim('✖')) : t.mood
-      out += `${lead}${photo}{${color}-fg}${label}{/${color}-fg}${mood} {/${bg}-bg}`
+      out += `${lead}{${color}-fg}${label}{/${color}-fg}${mood} {/${bg}-bg}`
       x += 1 + w
     }
     // Status flush right: the transient message (yellow) or the connection; truncated if it doesn't fit.
@@ -2582,12 +2564,29 @@ export class Ui {
   private drawChatHead() {
     const jid = this.pickerOpen || this.showingQr ? undefined : this.current
     let rows = 0
+    this.headPhoto = undefined
+    this.headName = undefined
     if (jid) {
-      const name = chatName(jid), color = colorFor(jid), width = num(this.screen.width) - 2
+      // The chat's photo before the name, square (a cell is twice as tall as wide) and as tall as the name, decoded
+      // whole for its size; its cells kept blank while it's decoded, so the name doesn't move.
+      const avatar = this.mode === 'none' ? undefined : (this.profiles.get(jid) ?? store.getProfile(jid))?.avatar
+      const file = avatar ? path.join(mediaDir(jid), avatar) : null
+      const d = file ? cached(file) : undefined
+      if (file && d === undefined) void decode(file).then(() => this.scheduleRender())
+      const name = chatName(jid), color = colorFor(jid), width = num(this.screen.width) - 2 - (file ? 9 : 0)
       const big = this.ruleChar === '─' && num(this.screen.height) >= 16 ? bigText(name, width) : null
       const lines = big ? big.map(l => `{${color}-fg}${esc(l)}{/${color}-fg}`) : [`{${color}-fg}{bold}${esc(truncate(name, width))}{/bold}{/${color}-fg}`]
-      this.chatHead.setContent(lines.join('\n'))
       rows = lines.length
+      const from = file ? rows * 2 + 1 : 0
+      this.headName = { from, to: from + Math.max(...(big ?? [truncate(name, width)]).map(l => strWidth(l))) }
+      if (file) {
+        const cols = rows * 2
+        const pic = d && !(d instanceof Error) ? d : undefined
+        if (pic) this.headPhoto = { jid, path: `${file}#head`, d: pic, cols, rows }
+        const cells = pic && !this.pics ? halfBlocks(pic, cols, rows) : []
+        lines.forEach((l, i) => { lines[i] = `${cells[i] ?? ' '.repeat(cols)} ${l}` })
+      }
+      this.chatHead.setContent(lines.join('\n'))
     }
     if (rows) this.chatHead.show(); else this.chatHead.hide()
     if (rows === this.headRows) return
@@ -3878,9 +3877,9 @@ export class Ui {
     this.pics.clear()
     const v = this.viewerImg
     if (v) return this.pics.place(v.path, v.d, v.x + 1, v.y + 1, v.cols, v.rows)
-    // The chats' photos in their tabs, before the names; with sixels in half-blocks, as on the screen's last row a
-    // picture would scroll it.
-    if (this.pics instanceof KittyImages) for (const tp of this.tabPhotos) this.pics.place(tp.path, tp.d, num(this.tabsBar.aleft) + tp.x + 1, num(this.tabsBar.atop) + 1, 2, 1)
+    // The open chat's photo, at the top left before its name.
+    const hp = this.headPhoto
+    if (hp && !this.pickerOpen) this.pics.place(hp.path, hp.d, num(this.chatHead.aleft) + num(this.chatHead.ileft) + 1, num(this.chatHead.atop) + 1, hp.cols, hp.rows)
     // With the list open, the pictures of the chats whose two rows are in view.
     if (this.pickerOpen) {
       for (const a of this.visibleAvatars()) this.pics.place(a.path, a.d, a.x + 1, a.y + 1, 4, 2)
@@ -4048,8 +4047,12 @@ export class Ui {
         pictureRow(grid, 4, 1, a.x, a.y + 1)
       }
     }
-    // The tabs' photos, in half-blocks.
-    for (const tp of this.mode === 'blocks' || this.mode === 'sixel' ? this.tabPhotos : []) pictureRow(blockGrid(tp.d, 2, 1), 2, 0, num(this.tabsBar.aleft) + tp.x, num(this.tabsBar.atop))
+    // The open chat's photo, in half-blocks.
+    const hp = this.mode === 'blocks' && !this.pickerOpen ? this.headPhoto : undefined
+    if (hp) {
+      const grid = blockGrid(hp.d, hp.cols, hp.rows), left = num(this.chatHead.aleft) + num(this.chatHead.ileft)
+      for (let r = 0; r < hp.rows; r++) pictureRow(grid, hp.cols, r, left, num(this.chatHead.atop) + r)
+    }
     // The popup's picture, over the panel.
     const v = this.mode === 'blocks' ? this.viewerImg : undefined
     if (v) {
