@@ -17,6 +17,16 @@ export function mix(a: Rgb, b: Rgb, t: number): Rgb {
 }
 
 const CUBE = [0, 95, 135, 175, 215, 255]
+
+/** The 256-palette's colour `i` in RGB: the 16 basic ones as xterm has them, then the 6×6×6 cube and the greys. */
+export function rgb256(i: number): Rgb {
+  const BASIC: Rgb[] = [[0, 0, 0], [205, 0, 0], [0, 205, 0], [205, 205, 0], [0, 0, 238], [205, 0, 205], [0, 205, 205], [229, 229, 229],
+    [127, 127, 127], [255, 0, 0], [0, 255, 0], [255, 255, 0], [92, 92, 255], [255, 0, 255], [0, 255, 255], [255, 255, 255]]
+  if (i < 16) return BASIC[i]!
+  if (i < 232) { const n = i - 16; return [CUBE[Math.floor(n / 36)]!, CUBE[Math.floor(n / 6) % 6]!, CUBE[n % 6]!] }
+  const g = 8 + (i - 232) * 10
+  return [g, g, g]
+}
 const nearestCube = (c: number) => CUBE.reduce((best, v, i) => (Math.abs(v - c) < Math.abs(CUBE[best]! - c) ? i : best), 0)
 const dist2 = (a: Rgb, b: Rgb) => (a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2 + (a[2] - b[2]) ** 2
 

@@ -84,9 +84,30 @@ class BackendProxy extends EventEmitter<WaEvents> implements Backend {
   }
 }
 
-const caps = await probeTerminal()
-// Sixels are encoded with sharp: the image mode is only sixel when it's there (detectImageMode).
-if (caps.sixel) await loadSharp()
-const backend = new BackendProxy()
-new Ui(backend, caps, process.argv.slice(2).join(' ').trim() || undefined)
-await backend.elect()
+const args = process.argv.slice(2)
+if (args[0] === '--web') {
+  // `wa --web [--port N] [--invite] [--cert fullchain.pem --key privkey.pem]`: no screen here, the browser's tabs each
+  // run wa (web.ts); this process keeps the WhatsApp connection, as the server or a client of one, so it stays up
+  // with no tab open. With a certificate, over HTTPS for other devices; without, over HTTP on this machine only.
+  const arg = (name: string) => { const i = args.indexOf(name); return i > 0 ? args[i + 1] : undefined }
+  const port = Number(arg('--port')) || 8799
+  const cert = arg('--cert'), key = arg('--key')
+  const backend = new BackendProxy()
+  await backend.elect()
+  const { startWeb } = await import('./web.js')
+  await startWeb(port, args.includes('--invite'), cert && key ? { cert, key } : undefined)
+} else if (args[0] === '--web-tab') {
+  // A browser's tab, started by `wa --web` (web.ts): no terminal, blessed draws for the page (webtab.ts).
+  const { WebTab, webCaps } = await import('./webtab.js')
+  const tab = await WebTab.open()
+  const backend = new BackendProxy()
+  new Ui(backend, webCaps(), undefined, tab)
+  await backend.elect()
+} else {
+  const caps = await probeTerminal()
+  // Sixels are encoded with sharp: the image mode is only sixel when it's there (detectImageMode).
+  if (caps.sixel) await loadSharp()
+  const backend = new BackendProxy()
+  new Ui(backend, caps, args.join(' ').trim() || undefined)
+  await backend.elect()
+}

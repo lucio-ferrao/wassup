@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="pt">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, interactive-widget=resizes-content">
+  <meta name="theme-color" content="#0b141a">
+  <title>wassup</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2064%2064%22%3E%3Ctext%20x%3D%2232%22%20y%3D%2252%22%20font-size%3D%2252%22%20text-anchor%3D%22middle%22%3E%F0%9F%91%BE%3C%2Ftext%3E%3C%2Fsvg%3E">
+  <link rel="stylesheet" href="/app.css">
+  <script type="module" src="/app.js"></script>
+</head>
+<body>
+  <main id="term" hidden>
+    <div id="screen"><div id="grid"></div><div id="pics"></div></div>
+    <textarea id="input" autocapitalize="off" autocomplete="off" autocorrect="off" spellcheck="false" aria-label="wassup"></textarea>
+  </main>
+  <section id="door" hidden>
+    <h1>wassup 👾</h1>
+    <p id="door-text"></p>
+    <button id="door-button" type="button" hidden></button>
+    <p id="door-error" role="alert"></p>
+  </section>
+  <button id="menu-button" type="button" hidden aria-label="menu">⋯</button>
+  <a id="toast" hidden target="_blank" rel="noopener"></a>
+  <nav id="keys" hidden>
+    <button type="button" data-send="esc">Esc</button>
+    <button type="button" data-send="tab">Tab</button>
+    <button type="button" data-send="up">↑</button>
+    <button type="button" data-send="down">↓</button>
+    <button type="button" data-send="left">←</button>
+    <button type="button" data-send="right">→</button>
+    <button type="button" data-send="slash">/</button>
+  </nav>
+  <dialog id="menu">
+    <button id="add-device" type="button"></button>
+    <div id="invite" hidden>
+      <p id="invite-text"></p>
+      <div id="invite-qr"></div>
+      <p><a id="invite-link" target="_blank" rel="noopener"></a></p>
+    </div>
+    <button id="sign-out" type="button"></button>
+    <button id="close-menu" type="button">✖</button>
+  </dialog>
+</body>
+</html>

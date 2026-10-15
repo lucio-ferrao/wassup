@@ -92,6 +92,8 @@ const STRINGS = {
   search: { pt: 'procurar', en: 'search' },
   searchHeader: { pt: '{0} de {1} · ↑ mais antiga, ↓ mais recente · Enter fica nela · Esc fecha', en: '{0} of {1} · ↑ older, ↓ newer · Enter stays on it · Esc closes' },
   searchNone: { pt: 'sem resultados', en: 'no results' },
+  webListening: { pt: 'wassup na web em {0}', en: 'wassup on the web at {0}' },
+  webInvite: { pt: 'Registar uma passkey (uso único, 15 minutos): {0}', en: 'Register a passkey (single use, 15 minutes): {0}' },
 } as const
 
 export type Key = keyof typeof STRINGS

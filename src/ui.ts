@@ -11,6 +11,7 @@ import type { Backend } from './backend.js'
 import { waMarkup, clipTagged, esc, colorFor, setTheme, dim, faint, italic, padding, fmtTime, fmtDay, fmtWhen, fmtWhenAt, dayKey, truncate, strWidth, wrapTagged, alignRight, visibleWidth, fold, graphemes, wrapChars } from './format.js'
 import { decode, cached, decodeThumb, thumbCached, cellSize, halfBlocks, blockGrid, blockCell, detectImageMode, detectRgb, KittyImages, RgbPainter, type BlockGrid, type Decoded, type ImageMode, type RgbCell } from './image.js'
 import { logger, uiLog } from './log.js'
+import { dirs } from './config.js'
 import { linksIn, showLinks, URL_RE } from './links.js'
 import { patchBlessedDraw, patchBlessedUnicode, tameEmoji } from './unicode.js'
 import type { TermCaps } from './term.js'
@@ -19,9 +20,10 @@ import { enableKittyKeyboard } from './kittykeys.js'
 import { enableBracketedPaste } from './paste.js'
 import { Hearts, reaction, emojiOnly, emojiPng } from './hearts.js'
 import { SixelImages } from './sixel.js'
+import { WebImages, type WebTab } from './webtab.js'
 import { bigText } from './bigtext.js'
 import { t } from './i18n.js'
-import { parseHex, mix, nearest256, type Rgb } from './rainbow.js'
+import { parseHex, mix, nearest256, rgb256, type Rgb } from './rainbow.js'
 import { suggest, describe, llmEnabled, type Suggestion, type Fix } from './llm.js'
 import { spellFixes } from './spell.js'
 import { patchBlessedItalic } from './italic.js'
@@ -458,12 +460,12 @@ export class Ui {
   private viewerBox: blessed.Widgets.BoxElement
   private viewerImg: { d: Decoded; path: string; x: number; y: number; cols: number; rows: number } | undefined
   private mode: ImageMode
-  /** The pictures drawn in real pixels, over blank cells: Kitty's placements or sixels; none in half-blocks. */
-  private pics: KittyImages | SixelImages | undefined
+  /** The pictures drawn in real pixels, over blank cells: Kitty's placements, sixels or a browser's; none in half-blocks. */
+  private pics: KittyImages | SixelImages | WebImages | undefined
   /** Once the terminal stops being resized, the images are sent to it again (see the 'resize' handler). */
   private resendTimer: NodeJS.Timeout | undefined
-  /** Half-block images and message bubbles repainted in 24-bit colour, when the terminal takes it. */
-  private rgbPaint: RgbPainter | undefined
+  /** Half-block images and message bubbles repainted in 24-bit colour, when the terminal takes it (or the page). */
+  private rgbPaint: Pick<RgbPainter, 'snapshot' | 'paint'> | undefined
   private connText = t('connecting')
   private transient = ''
   private transientTimer: NodeJS.Timeout | undefined
@@ -510,8 +512,9 @@ export class Ui {
   private get bottom(): number { return this.inputRows + 1 + (this.plainInput ? 1 : 0) }
   /** Lines occupied at the top: the tab bar (1), which doesn't exist in single-chat mode. */
 
-  constructor(private wa: Backend, caps: TermCaps, private wanted?: string) {
-    this.mode = detectImageMode(caps.kittyGraphics, inHerdr, caps.sixel && !!caps.cellPx)
+  /** `web`: in a browser's tab (wa --web), where blessed draws for the page and not a terminal (webtab.ts). */
+  constructor(private wa: Backend, caps: TermCaps, private wanted?: string, private web?: WebTab) {
+    this.mode = web ? 'web' : detectImageMode(caps.kittyGraphics, inHerdr, caps.sixel && !!caps.cellPx)
     ;({ dark: this.dark, selected: this.selectedBg } = theme(caps.bg))
     // WhatsApp Web's bubbles: on a dark theme #005c4b mine and #202c33 theirs, on a light one #d9fdd3 and #ffffff.
     // Mine a step quieter than theirs: darker on a dark theme, lighter on a light one; never the selection's grey,
@@ -526,7 +529,11 @@ export class Ui {
     // blessed scrolls a panel as wide as the screen by having the terminal slide its lines (insert and delete line in
     // a scroll region), but sixels slide with them, out of the panel too, onto the title or the band, where nothing
     // writes them away: with sixels no panel has clean sides (cleanSides), so its lines are written again instead.
-    this.screen = blessed.screen({ smartCSR: this.mode !== 'sixel', fullUnicode: caps.utf8, title: 'wassup', warnings: false })
+    this.screen = blessed.screen({
+      smartCSR: this.mode !== 'sixel', fullUnicode: caps.utf8, title: 'wassup', warnings: false,
+      // blessed's types want a Readable for the output, which is a Writable.
+      ...(web && { input: web.input, output: web.output as never, terminal: 'xterm-256color' }),
+    })
     if (this.mode === 'sixel') (this.screen as unknown as { cleanSides: () => boolean }).cleanSides = () => false
     // blessed takes the colours' count from the terminfo entry, and some it can't read (foot's gave it 8, for 256):
     // every colour then came down to the eight basic ones, the band's green to black. Where the terminal says it has
@@ -538,9 +545,10 @@ export class Ui {
     // set blessed enables for xterm (1000/1002/1003/1005): any-motion reporting (1003) and UTF-8 encoding (1005)
     // confuse SSH apps on phones like Termius, which with 1000+1006 send taps as clicks, and foot warns it doesn't
     // know 1005. Any-motion reporting, which the hover needs, is only asked of terminals that identified themselves
-    // (XTVERSION): desktop ones, not those apps. These are the modes blessed turns on itself, with the first element
-    // that takes clicks, so its own set is never sent; it turns off whatever was enabled on exit.
-    this.anyMotion = caps.version != null
+    // (XTVERSION), desktop ones, not those apps, and of the browser (wa --web). These are the modes
+    // blessed turns on itself, with the first element that takes clicks, so its own set is never sent; it turns off
+    // whatever was enabled on exit.
+    this.anyMotion = caps.version != null || !!web
     const modes = { vt200Mouse: true, cellMotion: true, allMotion: this.anyMotion, sgrMouse: true }
     const mice = this.screen.program as unknown as { enableMouse: () => void; setMouse: (o: Record<string, boolean>, enable: boolean) => void }
     mice.enableMouse = () => mice.setMouse(modes, true)
@@ -554,6 +562,7 @@ export class Ui {
     if (this.mode === 'kitty') this.pics = new KittyImages(s => program._write(s))
     // Sixels need the cells' size in pixels; forced (WA_IMAGES) where the terminal didn't say, a common one.
     else if (this.mode === 'sixel') this.pics = new SixelImages(s => program._write(s), caps.cellPx ?? { w: 10, h: 20 }, () => this.scheduleRender())
+    else if (web) this.pics = web.images
     // Focus events (DECSET 1004): a terminal that knows them says when this window or pane gains or loses the
     // focus, which decides whether activity here keeps this device online; one that doesn't simply ignores it.
     program._write('\x1b[?1004h')
@@ -570,8 +579,8 @@ export class Ui {
     this.screen.program.on('blur', () => focusChanged(false))
     // In Herdr the events only come with a change, so the pane's state at start is asked of Herdr.
     paneFocusedHerdr().then(f => { if (f !== undefined && this.hasFocus === undefined) focusChanged(f) }).catch(() => {})
-    if (detectRgb(caps.truecolor)) {
-      this.rgbPaint = new RgbPainter(s => program._write(s))
+    if (web || detectRgb(caps.truecolor)) {
+      this.rgbPaint = web ? web.painter : new RgbPainter(s => program._write(s))
       const lum = ([r, g, b]: Rgb) => 0.2126 * r + 0.7152 * g + 0.0722 * b
       const theirs: Rgb = this.dark ? [0x20, 0x2c, 0x33] : [0xff, 0xff, 0xff]
       const green: Rgb = this.dark ? [0x00, 0x5c, 0x4b] : [0xd9, 0xfd, 0xd3]
@@ -733,7 +742,8 @@ export class Ui {
       if (this.pics instanceof SixelImages) this.pics.snapshot(this.screenRows('olines'), this.screenRows('lines'))
       draw(start, end)
     }
-    this.screen.on('render', () => { this.loadVisibleImages(); this.loadVisibleProfiles(); this.placeImages(); this.paintRgb(); this.paintBigEmoji(); this.flushSixels() })
+    this.screen.on('render', () => { this.loadVisibleImages(); this.loadVisibleProfiles(); this.placeImages(); this.paintRgb(); this.paintBigEmoji(); this.flushSixels(); this.web?.frame() })
+    this.web?.attach(() => this.screenRows('lines'))
 
     // The mouse wheel scrolls one line per notch (by default blessed jumps half the panel, or two list entries).
     this.msgBox.removeAllListeners('wheeldown')
@@ -867,10 +877,11 @@ export class Ui {
         return this.renderNow()
       }
       this.hideSentFix()
-      // A click on a link copies it, whole; on a group member's name or a mention, it opens the chat with that person;
-      // on a passage of mine marked wrong, its correction floats above it, to be clicked in turn.
+      // A click on a link copies it, whole, or in a browser opens it in a tab; on a group member's name or a mention,
+      // it opens the chat with that person; on a passage of mine marked wrong, its correction floats above it, to be
+      // clicked in turn.
       if (!dragged) {
-        const url = this.linkAt(data.x, data.y); if (url) return this.copyToClipboard(url)
+        const url = this.linkAt(data.x, data.y); if (url) return this.web ? this.web.send({ t: 'link', url }) : this.copyToClipboard(url)
         if (row) { const hit = this.fixAt(data.x, data.y, row); if (hit) return this.showSentFix(row, hit.fix, hit.x, data.y) }
         const who = lineAt(data.y, data.x)?.name; if (who) return this.openChat(canonicalJid(who))
       }
@@ -1397,9 +1408,10 @@ export class Ui {
     if (out.length) this.copyToClipboard(out.join('\n'))
   }
 
-  /** Puts `text` in the terminal's clipboard (OSC 52) and says so in the status. */
+  /** Puts `text` in the terminal's clipboard (OSC 52), or the browser's, and says so in the status. */
   private copyToClipboard(text: string) {
-    ;(this.screen.program as unknown as { _write: (s: string) => void })._write(`\x1b]52;c;${Buffer.from(text).toString('base64')}\x1b\\`)
+    if (this.web) this.web.send({ t: 'copy', text })
+    else (this.screen.program as unknown as { _write: (s: string) => void })._write(`\x1b]52;c;${Buffer.from(text).toString('base64')}\x1b\\`)
     this.flash(t('copied'))
   }
 
@@ -1931,9 +1943,8 @@ export class Ui {
     // While someone types there, the two emoji taking turns (typingEmoji) stand where the state's is; with no state
     // (yet), its place is kept blank, so the tab doesn't grow when one comes.
     const tabs = list.map((jid, i) => {
-      const chat = store.getChat(jid)
       // With messages unread, 🔔 in the state's place (while someone types there, the typing emoji still win).
-      const mood = this.typing.has(jid) ? ` ${typingEmoji()}` : chat?.unread ? ' 🔔' : this.moodOf(jid, chat?.last_ts) || '   '
+      const mood = this.tabMark(jid) || '   '
       // Under the pointer, a faint ✖ to close it where the state's emoji is, as wide (tabHover).
       const closing = i === this.tabHover && !this.fixed
       return { jid, i, name: chatName(jid), mood: closing ? ' ✖'.padEnd(Math.max(2, strWidth(mood))) : mood, closing }
@@ -1956,8 +1967,7 @@ export class Ui {
     if (own) {
       const bg = this.bubbleBg.mine
       const strong = this.dark ? 'bright-white' : 'black'
-      const unread = store.listChats().some(c => c.unread > 0 && !c.archived)
-      const close = ownClose ? ` ${dim('✖')} ` : this.typing.size ? ` ${typingEmoji()}` : unread ? ' 🔔' : ' 👾'
+      const close = ownClose ? ` ${dim('✖')} ` : this.listMark()
       out += ` {${bg}-bg} {${strong}-fg}{bold}${esc(own)}{/bold}{/${strong}-fg}${close} {/${bg}-bg}`
       this.segments.push({ x0: 1, x1: ownW, index: -1 })
       if (ownClose) this.tabCloses.push({ x: 2 + strWidth(own) + 1, index: -1 })
@@ -2332,10 +2342,29 @@ export class Ui {
       const [top, bottom] = halfBlocks(d, 4, 2)
       return [top!, bottom!]
     }
-    const words = chatName(c.jid).split(/\s+/).filter(w => /^\p{L}/u.test(w) && !/^(de|da|do|das|dos|e)$/i.test(w))
-    const initials = (words.length ? words.slice(0, 2).map(w => [...w][0]!.toUpperCase()).join('') : '#').padEnd(2)
+    const initials = this.initialsOf(c.jid).padEnd(2)
     const color = colorFor(c.jid)
     return [`{${color}-bg}{bold} ${esc(initials)} {/bold}{/${color}-bg}`, `{${color}-bg}    {/${color}-bg}`]
+  }
+
+  /** A chat's initials, for its photo when it has none: two from its name's words, "de", "da"… left out; or "#". */
+  private initialsOf(jid: string): string {
+    const words = chatName(jid).split(/\s+/).filter(w => /^\p{L}/u.test(w) && !/^(de|da|do|das|dos|e)$/i.test(w))
+    return words.length ? words.slice(0, 2).map(w => [...w][0]!.toUpperCase()).join('') : '#'
+  }
+
+  /**
+   * What stands after a chat's name in its tab and the window title: two emoji taking turns while someone types
+   * there, 🔔 with messages unread, or its state's emoji; nothing without any.
+   */
+  private tabMark(jid: string): string {
+    const chat = store.getChat(jid)
+    return this.typing.has(jid) ? ` ${typingEmoji()}` : chat?.unread ? ' 🔔' : this.moodOf(jid, chat?.last_ts)
+  }
+
+  /** What stands after the chat list's own name: someone typing in any chat, 🔔 with messages unread in any, or 👾. */
+  private listMark(): string {
+    return this.typing.size ? ` ${typingEmoji()}` : store.listChats().some(c => c.unread > 0 && !c.archived) ? ' 🔔' : ' 👾'
   }
 
   /** The chats whose number the server found to be a WhatsApp Business account. */
@@ -2607,8 +2636,18 @@ export class Ui {
     const unread = store.listChats().filter(c => c.unread > 0 && (this.fixed ? c.jid === this.current : !c.archived))
     const typing = [...this.typing].filter(jid => !this.fixed || jid === this.current).map(jid => chatName(jid))
     const mark = inHerdr ? '' : typing.length ? `${typingEmoji()} ` : unread.length ? '● ' : ''
-    const title = `${mark}${this.current ? chatName(this.current) : 'wassup'}`
-    if (title !== this.titleShown) { this.titleShown = title; this.screen.title = title; titleHerdr(title) }
+    // In a browser (wa --web) the page's tab says what wa's tab does: the chat's name and what follows it, or the
+    // list's; and its icon is the chat's (webIcon).
+    const listed = this.pickerOpen || !this.current
+    const title = this.web
+      ? (listed ? `${APP}${this.listMark()}` : `${chatName(this.current!)}${this.tabMark(this.current!)}`)
+      : `${mark}${this.current ? chatName(this.current) : 'wassup'}`
+    if (title !== this.titleShown) {
+      this.titleShown = title
+      if (this.web) this.web.send({ t: 'title', text: title }); else this.screen.title = title
+      titleHerdr(title)
+    }
+    if (this.web) this.webIcon(listed ? undefined : this.current)
     // In Herdr, alone in its tab, the tab takes the chat's first name, with no state.
     if (inHerdr) tabNameHerdr(this.current ? shortName(this.current) : null)
     // In Herdr the agent's status: "working" while someone types; "done", in blue, from a new unread message until you
@@ -2622,12 +2661,32 @@ export class Ui {
     this.unreadShown = total
   }
 
+  /** The page's icon last told (webIcon), so it's told again only when it changes. */
+  private iconShown = ''
+  /**
+   * In a browser, the page's tab takes the chat's icon: its photo, served from the media folder, or its initials on
+   * its colour, as the chat list has them; with the list open, 👾.
+   */
+  private webIcon(jid: string | undefined) {
+    const avatar = jid ? (this.profiles.get(jid) ?? store.getProfile(jid))?.avatar : undefined
+    const icon = !jid ? {}
+      : avatar ? { photo: path.relative(dirs.media, path.join(mediaDir(jid), avatar)) }
+      : { initials: this.initialsOf(jid), color: `#${rgb256(colorFor(jid)).map(v => v.toString(16).padStart(2, '0')).join('')}` }
+    const key = JSON.stringify(icon)
+    if (key === this.iconShown) return
+    this.iconShown = key
+    this.web?.send({ t: 'icon', ...icon })
+  }
+
   quit(reason?: string) {
     this.pics?.dispose()
     if (this.pics instanceof SixelImages) this.pics.end()
     this.disableKittyKeyboard?.()
     this.disablePaste()
     ;(this.screen.program as unknown as { _write: (s: string) => void })._write('\x1b[?1004l')
+    // In a browser (wa --web), leaving wa signs out: the page is told, and goes back to the passkey. Not when it ends
+    // on an error.
+    if (this.web && !reason) this.web.send({ t: 'logout' })
     const released = releaseHerdr()
     this.screen.destroy()
     // Nothing the connection reports while closing reaches the destroyed screen.
@@ -3907,7 +3966,11 @@ export class Ui {
       const top = clines.ftor[b.line]?.[0]
       if (top == null || top < base || top + 1 >= base + innerH) continue
       const row = num(this.msgBox.atop) + num(this.msgBox.itop) + (top - base) + 1
-      b.emoji.forEach((e, k) => { const d = this.emojiImage(e); if (d) this.pics!.place(`emoji:${e}`, d, col + b.col + 4 * k, row, 4, 2) })
+      b.emoji.forEach((e, k) => {
+        // The page draws them as text, twice the size.
+        if (this.pics instanceof WebImages) return this.pics.emoji(e, col + b.col + 4 * k, row)
+        const d = this.emojiImage(e); if (d) this.pics!.place(`emoji:${e}`, d, col + b.col + 4 * k, row, 4, 2)
+      })
     }
   }
 
@@ -4123,6 +4186,9 @@ export class Ui {
       this.wa.ensureMedia(row)
       return this.flash(t('downloading'))
     }
+    // In a browser (wa --web) the page opens it, on the device it's on: told the file, from the media folder, which
+    // the server only serves from there, signed in (web.ts).
+    if (this.web) return this.web.send({ t: 'open', file: path.relative(dirs.media, file) })
     // The desktop's own opener: `open` on macOS, `xdg-open` elsewhere.
     const opener = process.platform === 'darwin' ? 'open' : 'xdg-open'
     const child = spawn(opener, [file], { detached: true, stdio: 'ignore' })

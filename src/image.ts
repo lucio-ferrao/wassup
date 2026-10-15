@@ -315,7 +315,8 @@ export function detectRgb(confirmed: boolean): boolean {
   return forced === 'truecolor' ? true : forced === '256' ? false : confirmed
 }
 
-export type ImageMode = 'kitty' | 'sixel' | 'blocks' | 'none'
+/** 'web': in a browser's tab, the page draws them (webtab.ts). */
+export type ImageMode = 'kitty' | 'sixel' | 'blocks' | 'none' | 'web'
 
 /**
  * `WA_IMAGES` forces the mode; otherwise what the terminal answered during probing is used: Kitty's graphics, or

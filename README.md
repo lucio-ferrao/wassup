@@ -160,6 +160,31 @@ terminal confirms it (XTGETTCAP or DECRQSS; Herdr does), in the 256-colour palet
 selected image, sticker or link preview gets a sentence or two from the local model (see below) on what it shows, beside
 it, or under it when there's no room.
 
+### On the web
+
+`wa --web` serves wassup to a browser: each tab runs wa itself, on this machine, which sends the page its screen cell by
+cell, the colours resolved, and the page draws it in HTML, so the screen is the terminal's; pictures go as pictures,
+over their cells, and a frame goes once the page has drawn the one before, so a slow link skips frames rather than
+falling behind. Keys, clicks, the wheel and a finger's drag go back as a terminal would send them; with Shift held, the
+mouse selects text the browser's way. The process keeps the WhatsApp connection, as the server or a client of one, with
+no tab open too. Without a certificate it listens on `localhost` only, over HTTP (`http://localhost:8799`, `--port` to
+change it); with one, Let's Encrypt's as certbot makes it, over HTTPS on every interface, under the certificate's name,
+which it then answers to alone, and it reads the files again when certbot renews them:
+
+```
+wa --web --port 59137 --cert ~/.config/wa/tls/fullchain.pem --key ~/.config/wa/tls/privkey.pem
+```
+
+certbot keeps the key readable by root only: a deploy hook can copy both files where the user running wa reads them.
+
+Entry is by passkey, with no password: the device's fingerprint, face or PIN. On start, while there's none, it prints
+a single-use link valid for 15 minutes that registers the first (`--invite` prints one anyway); the menu in the
+corner (⋯) makes such links for other devices, with a QR code, and signs out. A session lasts 30 days unused. The
+browser's tab says what wa's does: the chat's name and its emoji, with its photo (or its initials on its colour) for
+icon, or 👾 on the chat list. An attachment opens in a tab of its own, from the server's media folder, and so does
+a link clicked in a message, which in the terminal is copied instead; on a phone a bar under the screen has the keys
+its keyboard lacks (Esc, Tab, the arrows, `/`).
+
 ## Writing suggestions
 
 With a local `llama-server` at `http://127.0.0.1:8080` (or `WA_LLM`), model `gemma4-26b` (or `WA_LLM_MODEL`), the
@@ -210,6 +235,8 @@ History starts with what WhatsApp sends to new devices. `WA_FULL_HISTORY=1` asks
 | `src/links.ts`, `src/clearurls/` | Links cleaned of tracking and shortened; ClearURLs' rules (LGPL-3.0, from [ClearURLs/Rules](https://github.com/ClearURLs/Rules) at 11086f4, 2026-03-25) |
 | `src/fonts/` | Noto Color Emoji (COLRv1, OFL-1.1, from [googlefonts/noto-emoji](https://github.com/googlefonts/noto-emoji) v2.051), for the big emoji where the system has no colour emoji font |
 | `src/image.ts` | Decoding, half-blocks (24-bit or 256 colours), Kitty graphics protocol |
+| `src/web.ts`, `src/web/` | `wa --web`: the server, passkeys, and the page that draws wa's screen and sends it the keys and the mouse |
+| `src/webtab.ts` | wa in a browser's tab (`--web-tab`): blessed's frames, cell by cell, and the pictures, for the page |
 | `src/sixel.ts` | Sixel graphics: encoding with a palette, and drawing the pictures again where blessed wrote over them |
 | `src/bigtext.ts` | The open chat's name in big letters, in the rounded lines of the wordmark |
 | `src/term.ts` | Probing the terminal's capabilities |
