@@ -2662,10 +2662,9 @@ export class Ui {
 
   // ---------- drawing ----------
 
+  // The bar now; a redraw it was waiting for (dirtyTabs) still comes, as it brings the title along (renderNow).
   private drawStatus() {
-    this.dirtyTabs = true
     this.drawTabs()
-    this.dirtyTabs = false
   }
 
   // ---------- emoji suggestions ----------
