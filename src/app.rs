@@ -2310,7 +2310,9 @@ impl App {
         self.anchor = None;
         self.sent_fix = None;
         self.text_sel = None;
-        if top == 0 && n < 0 {
+        // At the top, one page more, once the rows are the ones drawn: the page just loaded isn't laid out yet, so a
+        // burst of keys or wheel notches before the next frame would find the top still there and load page after page.
+        if top == 0 && n < 0 && !self.rows_dirty {
             self.load_older();
         }
     }
