@@ -1,24 +1,24 @@
 # wassup
 
 A WhatsApp client for the terminal, inspired by [wechit](https://github.com/LingDong-/wechit). It connects as a
-"linked device" through the [baileys](https://github.com/WhiskeySockets/Baileys) library, keeps everything in a local
-SQLite database and draws the interface with panels, mouse and images right in the terminal.
+"linked device" through the [whatsapp-rust](https://github.com/jlucaso1/whatsapp-rust) library, keeps everything in a
+local SQLite database and draws the interface with panels, mouse and images right in the terminal.
+
+It was written in TypeScript on Node.js first, on [baileys](https://github.com/WhiskeySockets/Baileys); that version is
+at the tag `node`, and the comments that name its files (`ui.ts`, `wa.ts` …) mean them there.
 
 ## Running
 
 ```sh
-npm install -g github:lucio-ferrao/wassup --allow-git=all --install-links
+cargo install --git https://github.com/lucio-ferrao/wassup
 wa              # from anywhere: opens on the chat list
 wa emma         # opens straight into the chat whose name or number contains "emma"
+wa --demo       # invented chats, with no WhatsApp behind, to try it out
 ```
 
-`--install-links` makes npm put a real copy in place: without it npm 11 links the package to a temporary clone it then
-deletes, and the install fails ("spawn sh ENOENT" in `node_modules/baileys`) or ends up empty. `--allow-git=all` lets
-npm 12 install from GitHub, which it refuses by default (npm 11 needs `all`, as it turns `root` down for a global
-install; npm 10 ignores it). npm 12 then warns that it skipped three dependencies' install scripts; they aren't
-needed. Without installing, `npx --allow-git=all --install-links github:lucio-ferrao/wassup` runs it from npm's cache
-(the first time downloads the dependencies, about 100 MB). Or, from a clone: `npm install`, then `./wa` (or `npm
-start`).
+`cargo install` builds it (a couple of minutes the first time) and puts `wa` in `~/.cargo/bin`. Or, from a clone:
+`cargo build --release`, then `target/release/wa`. The dictionaries, the emoji font and the web page are inside the
+program, so the one file is all it needs.
 
 The first time, a QR code appears: on the phone, WhatsApp › Settings › Linked devices › Link a device. The session is
 saved and later runs connect directly.
@@ -30,7 +30,8 @@ or pane loses the focus, in terminals that report it (Herdr does). A message arr
 as read only while you show as online and, in Herdr, its pane has the focus; otherwise it stays unread, and the phone
 notifies, until you write, open the chat or come back to the terminal.
 
-Requirements: Node 22.13 or newer (it uses the SQLite built into Node).
+Requirements, to build it: Rust's stable toolchain (1.85 or newer, for the 2024 edition) and a C compiler, for
+SQLite, which comes built in, and the cryptography.
 
 Language: Portuguese or English, from `WA_LANG` or the locale (`LC_ALL`, `LC_MESSAGES`, `LANG`). It sets the interface
 texts, the emoji names and the language of the writing suggestions.
@@ -115,7 +116,7 @@ terminal theme's, and on startup the terminal is asked for its real background c
 - **Single chat**: `wa <name>` opens only that chat, its tab alone under the band, without notices from others; the
   `/` list swaps it. An emoji on its own, as a message or a reaction, sends a big copy of it floating up the panel,
   drawn in block characters from the system's emoji font (the same glyph and colours the terminal shows), or, where
-  the system has no colour one, from the Noto Color Emoji that comes with wassup; needs `sharp`.
+  the system has no colour one, from the Noto Color Emoji that comes with wassup.
 
 ### Herdr
 
@@ -134,7 +135,7 @@ the name, with `●` for unread messages or the same two emoji taking turns whil
 WhatsApp markup is shown with terminal attributes: `*bold*`, `_italic_`, `~strikethrough~`, `` `code` ``, `> quote`.
 When sending, write the markup as on the phone. `:name:` codes are replaced by the emoji as soon as the second `:` is
 typed, with names in Portuguese and in English (`:thumbsup:` 👍, `:kissing_heart:` 😘, `:coffee:` ☕ …; the list is in
-`src/emoji.ts`). The suggestion list (`:` and a letter) finds them by either language's names too, showing the user's
+`src/emojicodes.rs`). The suggestion list (`:` and a letter) finds them by either language's names too, showing the user's
 language's when both match; `:` on its own lists the basic smileys. Classic smileys (`:)`, `;)`, `<3` …), on their own
 after a space, get their emoji offered in the list, which Tab or → take; a space after one either goes in, the smiley
 sent as typed, or takes the emoji too, as learnt from what you did the last two times: taking the emoji both times (Tab,
@@ -151,9 +152,8 @@ identifiers made `…` and the parameters left out (`instagram.com/reel/…`, `i
 
 On startup the client asks the terminal what it can do, assuming nothing from `TERM`. In terminals with the Kitty
 graphics protocol (Ghostty, Kitty, WezTerm, Konsole, iTerm2 3.7) images, stickers and thumbnails are shown for real
-inside the panel; in those that take sixels instead (foot, among others), announced in their identification, their
-cells' size in pixels asked and `sharp` there to encode them, too, but for the tabs' photos, in half-blocks, as on the
-screen's last row a picture would scroll it; elsewhere, and inside Herdr (which doesn't pass the placements through),
+inside the panel; in those that take sixels instead (foot, among others), announced in their identification and their
+cells' size in pixels known, too; elsewhere, and inside Herdr (which doesn't pass the placements through),
 they are drawn with coloured half-blocks, each the average colour of the area it covers: in 24-bit colour when the
 terminal confirms it (XTGETTCAP or DECRQSS; Herdr does), in the 256-colour palette otherwise.
 `WA_IMAGES=kitty|sixel|blocks|none` forces the mode, and `WA_COLORS=truecolor|256` the colours. In half-blocks, the
@@ -172,7 +172,7 @@ change it); with one, Let's Encrypt's as certbot makes it, over HTTPS on every i
 which it then answers to alone, and it reads the files again when certbot renews them:
 
 ```
-wa --web --port 59137 --cert ~/.config/wa/tls/fullchain.pem --key ~/.config/wa/tls/privkey.pem
+wa --web --port 59137 --cert ~/.config/wassup/tls/fullchain.pem --key ~/.config/wassup/tls/privkey.pem
 ```
 
 certbot keeps the key readable by root only: a deploy hook can copy both files where the user running wa reads them.
@@ -193,8 +193,9 @@ the word being typed, right at the cursor, and every wrong passage already writt
 missing comma) underlined in yellow, with the right word right above the one the cursor is on, or the last. Tab, →
 or a click on it accept it; the others stay underlined. The prompt is in the user's language. `WA_LLM=off` turns the
 model off. Without it (`WA_LLM=off`, or no server answering, then for a minute before asking again) a small local
-spell checker stands in, words only, in the same way: Hunspell in WebAssembly with LibreOffice's Portuguese (Portugal)
-and English dictionaries, a word being right in any of them; words you wrote yourself more than once and the names of
+spell checker stands in, words only, in the same way: LibreOffice's Hunspell dictionaries for Portuguese (Portugal)
+and English (GB and US), which come in the program, or the system's own in `/usr/share/hunspell` when it has them, read
+by [spellbook](https://github.com/helix-editor/spellbook), a word being right in any of them; words you wrote yourself more than once and the names of
 contacts and chats count as known, unless all they lack is an accent.
 
 Your last text message is checked the same way once sent, and an earlier one when you select it, while WhatsApp still
@@ -211,40 +212,43 @@ while the queue goes through.
 
 ## Data
 
-Everything lives in `~/.config/wa` (or `WA_HOME`), readable by this user only (mode 700, umask 077 for whatever is
-written):
+Everything lives in `~/.config/wassup` (or `$XDG_CONFIG_HOME/wassup`, or `WA_HOME`), readable by this user only (mode
+700, umask 077 for whatever is written):
 
 | Path | Contents |
 |---|---|
-| `auth/` | Session credentials (delete to link again) |
-| `wa.db` | SQLite with chats, contacts, messages and reactions |
+| `session.db` | Session credentials (delete to link again) |
+| `wassup.db` | SQLite with chats, contacts, messages and reactions |
 | `media/<chat>/` | Downloaded attachments and thumbnails |
-| `wa.log` | Log (level with `WA_LOG=info|debug`) |
+| `wassup.log` | Log (level with `WA_LOG=trace|debug|info|warn|error|off`, `info` unless told) |
 
 History starts with what WhatsApp sends to new devices. `WA_FULL_HISTORY=1` asks for the full history when linking.
+`wa --demo` keeps its invented chats apart, in `~/.cache/wassup/demo`, made afresh each time.
 
 ## Layout
 
 | File | Role |
 |---|---|
-| `src/wa.ts` | WhatsApp connection: QR, reconnection, messages, reactions, sending, attachments |
-| `src/ipc.ts` | Server and client over a Unix socket, so several processes share one connection |
-| `src/db.ts` | SQLite schema and queries (`node:sqlite`) |
-| `src/ui.ts` | blessed interface: panels, keyboard, mouse, message rendering |
-| `src/format.ts` | WhatsApp markup, dates, colours, line wrapping |
-| `src/links.ts`, `src/clearurls/` | Links cleaned of tracking and shortened; ClearURLs' rules (LGPL-3.0, from [ClearURLs/Rules](https://github.com/ClearURLs/Rules) at 11086f4, 2026-03-25) |
-| `src/fonts/` | Noto Color Emoji (COLRv1, OFL-1.1, from [googlefonts/noto-emoji](https://github.com/googlefonts/noto-emoji) v2.051), for the big emoji where the system has no colour emoji font |
-| `src/image.ts` | Decoding, half-blocks (24-bit or 256 colours), Kitty graphics protocol |
-| `src/web.ts`, `src/web/` | `wa --web`: the server, passkeys, and the page that draws wa's screen and sends it the keys and the mouse |
-| `src/webtab.ts` | wa in a browser's tab (`--web-tab`): blessed's frames, cell by cell, and the pictures, for the page |
-| `src/sixel.ts` | Sixel graphics: encoding with a palette, and drawing the pictures again where blessed wrote over them |
-| `src/bigtext.ts` | The open chat's name in big letters, in the rounded lines of the wordmark |
-| `src/term.ts` | Probing the terminal's capabilities |
-| `src/kittykeys.ts`, `src/paste.ts` | Kitty keyboard protocol and bracketed paste, read before blessed |
-| `src/herdr.ts` | Agent state, titles and tabs in Herdr |
-| `src/hearts.ts` | Animated emoji rising from a single-emoji message or reaction |
-| `src/i18n.ts` | Interface strings in Portuguese and English |
-| `src/llm.ts` | Writing suggestions, image descriptions and chats' states from the local `llama-server` |
-| `src/mood.ts` | Each chat's state as an emoji, worked out calmly by the server |
-| `src/spell.ts` | Local spell checker (Hunspell, pt-PT and English) when there's no model |
-| `src/emoji.ts`, `src/italic.ts`, `src/rainbow.ts` | `:name:` table, italics in blessed, colours |
+| `src/main.rs` | Start: the data folder, the log, the terminal taken over and given back |
+| `src/wa.rs` | WhatsApp connection: QR, reconnection, messages, reactions, sending, attachments |
+| `src/ipc.rs` | Server and client over a Unix socket, so several processes share one connection |
+| `src/store.rs` | SQLite schema and queries |
+| `src/app.rs` | The screen's state: keys, the mouse, the focus, the clock |
+| `src/ui.rs` | The frame: the list or the chat, the band where you write, the tabs, the pictures |
+| `src/chat.rs`, `src/list.rs` | A chat's messages, laid out in bubbles; the chat list |
+| `src/compose.rs` | Writing in the band, counted in graphemes |
+| `src/text.rs`, `src/format.rs`, `src/unicode.rs` | Colours, dates, line wrapping, WhatsApp markup, emoji widths |
+| `src/links.rs`, `clearurls/` | Links cleaned of tracking and shortened; ClearURLs' rules (LGPL-3.0, from [ClearURLs/Rules](https://github.com/ClearURLs/Rules) at 11086f4, 2026-03-25) |
+| `src/emoji.rs`, `fonts/` | Emoji as pictures from the system's colour emoji font, or from Noto Color Emoji (COLRv1, OFL-1.1, from [googlefonts/noto-emoji](https://github.com/googlefonts/noto-emoji) v2.051) |
+| `src/emojicodes.rs` | `:name:` table and classic smileys |
+| `src/kitty.rs`, `src/term.rs` | Kitty graphics protocol; probing the terminal's capabilities |
+| `src/web.rs`, `web/` | `wa --web`: the server, passkeys, and the page that draws wa's screen and sends it the keys and the mouse |
+| `src/webtab.rs` | wa in a browser's tab (`--web-tab`): the frames, cell by cell, and the pictures, for the page |
+| `src/bigtext.rs` | The open chat's name in big letters, in the rounded lines of the wordmark |
+| `src/herdr.rs` | Agent state, titles and tabs in Herdr |
+| `src/hearts.rs` | Animated emoji rising from a single-emoji message or reaction |
+| `src/i18n.rs` | Interface strings in Portuguese and English |
+| `src/llm.rs` | Writing suggestions, image descriptions and chats' states from the local `llama-server` |
+| `src/mood.rs` | Each chat's state as an emoji, worked out calmly by the server |
+| `src/spell.rs`, `dictionaries/` | Local spell checker (Hunspell's dictionaries, pt-PT and English) when there's no model |
+| `src/demo.rs` | `wa --demo`: invented chats and pictures |

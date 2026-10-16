@@ -9,7 +9,7 @@ are invented, and checked against the local database not to match anything in it
 
 ## Commits
 
-Never commit or push unless explicitly asked — implementing a change is not authorization to record it, and a previous "push" in the same session does not authorize the next one. When asked to "push", that means commit **and** push to `main` by fast-forward (`git push origin <branch>:main`), after `npm run check` passes.
+Never commit or push unless explicitly asked — implementing a change is not authorization to record it, and a previous "push" in the same session does not authorize the next one. When asked to "push", that means commit **and** push to `main` by fast-forward (`git push origin <branch>:main`), after `cargo clippy --release --all-targets` (no warnings) and `cargo test --release` pass.
 
 **No trailers.** Commit messages end with the last line of prose — no `Co-Authored-By`, no `Claude-Session`, no `Generated with`. This overrides the harness default that asks for them.
 

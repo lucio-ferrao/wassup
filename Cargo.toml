@@ -1,0 +1,47 @@
+[package]
+name = "wassup"
+version = "0.1.0"
+edition = "2024"
+description = "A WhatsApp client for the terminal"
+license = "MIT"
+repository = "https://github.com/lucio-ferrao/wassup"
+
+[[bin]]
+name = "wa"
+path = "src/main.rs"
+
+[dependencies]
+# Without "simd", which needs a nightly compiler.
+whatsapp-rust = { version = "0.7", default-features = false, features = ["sqlite-storage", "tokio-transport", "tokio-runtime", "ureq-client", "tokio-native", "signal"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time", "net", "io-util", "fs", "signal", "process"] }
+ratatui = "0.30"
+ratatui-image = { version = "11.1", default-features = false, features = ["image-defaults", "crossterm"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "gif"] }
+rusqlite = { version = "0.39", features = ["functions"] }
+qrcode = { version = "0.14", default-features = false }
+unicode-width = "0.2"
+unicode-segmentation = "1"
+unicode-normalization = "0.1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+anyhow = "1"
+log = "0.4"
+simplelog = "0.12"
+libc = "0.2"
+ureq = "3"
+rustybuzz = "0.20"
+# Without "png-format": only for painting COLR emoji glyphs, the PNGs are image's.
+tiny-skia = { version = "0.12", default-features = false, features = ["std", "simd"] }
+regex = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["raw_value"] }
+spellbook = "0.4.2"
+base64 = "0.22"
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
+bytes = "1"
+tokio-tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
+rustls-webpki = "0.103"
+ring = "0.17"
