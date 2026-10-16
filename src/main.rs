@@ -165,7 +165,12 @@ fn main() -> Result<()> {
     text::set_theme(text::Theme::new(caps.bg, caps.fg, caps.truecolor));
 
     let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
-    runtime.block_on(run(dir, demo, wanted, caps, picker))
+    let result = runtime.block_on(run(dir, demo, wanted, caps, picker));
+    // What's still under way on a thread of its own, a question to the model above all (up to its five minutes), is
+    // left behind: the runtime dropped would wait for it, with the screen already the terminal's and the program
+    // not ended.
+    runtime.shutdown_background();
+    result
 }
 
 async fn run(dir: PathBuf, demo: bool, wanted: Option<String>, caps: term::Caps, picker: ratatui_image::picker::Picker) -> Result<()> {

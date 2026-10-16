@@ -101,7 +101,10 @@ pub fn main(args: &[String]) -> Result<()> {
     let dir = setup(demo)?;
     log::info!("start: pid {}, web{}", std::process::id(), if demo { ", demo" } else { "" });
     let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
-    runtime.block_on(serve(dir, demo, port, invite, tls))
+    let result = runtime.block_on(serve(dir, demo, port, invite, tls));
+    // Not waiting for what's still under way, a question to the model above all, as in a terminal (main.rs).
+    runtime.shutdown_background();
+    result
 }
 
 /// What both ends do first, as main.rs does for a terminal: files for this user only, the data folder (WA_HOME, or

@@ -88,7 +88,10 @@ pub fn main(args: &[String]) -> Result<()> {
     let mut picker = Picker::from_fontsize(FontSize::new(CELL.0, CELL.1));
     picker.set_protocol_type(ProtocolType::Sixel);
     let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
-    runtime.block_on(run(dir, demo, size, lines, out, caps, picker))
+    let result = runtime.block_on(run(dir, demo, size, lines, out, caps, picker));
+    // Not waiting for what's still under way, a question to the model above all, as in a terminal (main.rs).
+    runtime.shutdown_background();
+    result
 }
 
 async fn run(
