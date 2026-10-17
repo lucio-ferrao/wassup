@@ -4,10 +4,12 @@
 //! (Let's Encrypt's, from certbot), over HTTPS on every interface, read again when renewed. This process keeps the
 //! WhatsApp connection as a terminal does (ipc.rs), as the one with it or a client of it, so it stays up with no tab
 //! open; with `--demo` there's none, and the tabs show the demonstration's invented chats, in a folder of their own.
+//! A tab whose connection drops waits for its page a while, which comes back to it by its id, where it was.
 //!
 //! Entry is by passkey (WebAuthn), with no password: the device's fingerprint, face or PIN, nothing to steal or guess,
 //! and useless on another site. The first one is registered through a single-use link printed on start, valid 15
-//! minutes; the next ones through links made from a device already in. A session is a random token in an HttpOnly,
+//! minutes; the next ones through links made from a device already in. Or by a code sent to my own chat on WhatsApp:
+//! six digits, good once and for 5 minutes, one a minute at most, void after 5 wrong tries. A session is a random token in an HttpOnly,
 //! SameSite=Strict cookie (Secure over HTTPS), kept hashed in the state table and dropped after 30 days unused. The
 //! passkeys, the sessions and the user's id are kept there as web.ts keeps them, under the same keys.
 
@@ -19,6 +21,7 @@ use std::net::{Ipv6Addr, SocketAddr};
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, SystemTime};
 
@@ -56,7 +59,7 @@ use tokio_tungstenite::tungstenite::protocol::{CloseFrame, Role, WebSocketConfig
 
 use crate::i18n::t;
 use crate::store::Store;
-use crate::wa::ToUi;
+use crate::wa::{Backend, Conn, ToUi};
 
 /// The port when none is given, web.ts's.
 const PORT: u16 = 8799;
@@ -69,6 +72,15 @@ const DEMO: &str = "web:demo";
 const IDLE_MS: i64 = 30 * 86_400_000;
 const INVITE_MS: i64 = 15 * 60_000;
 const CHALLENGE_MS: i64 = 5 * 60_000;
+/// A code to sign in with: how long it's good for, how long before another goes, the wrong tries it takes.
+const CODE_MS: i64 = 5 * 60_000;
+const CODE_EVERY_MS: i64 = 60_000;
+const CODE_TRIES: u8 = 5;
+/// How long a browser's tab waits for its page once the connection is gone (the phone put it away, the network
+/// dropped), to go on where it was when the page comes back.
+const PARKED_MS: i64 = 15 * 60_000;
+/// What a tab says before everything again for a page come back, after which what it said is for the new one.
+pub const AGAIN: &str = r#"{"t":"again"}"#;
 
 /// The page's own files, built in.
 const INDEX: &str = include_str!("../web/index.html");
@@ -140,11 +152,19 @@ async fn serve(dir: PathBuf, demo: bool, port: u16, invite: bool, tls: Option<(P
     } else {
         Some(crate::ipc::connect(store.clone(), &dir, wa_tx).await?)
     };
-    // There's no screen here: the tabs hear the connection on their own.
+    // There's no screen here: the tabs hear the connection on their own. Only whether it's open matters, for the
+    // codes to sign in with, and what the sending of one failed with.
+    let open = Arc::new(AtomicBool::new(false));
+    let is_open = open.clone();
     tokio::spawn(async move {
         while let Some(ev) = wa_rx.recv().await {
-            if let ToUi::Connection(c, why) = ev {
-                info!("web: connection {c:?} {why}");
+            match ev {
+                ToUi::Connection(c, why) => {
+                    is_open.store(c == Conn::Open, Ordering::Relaxed);
+                    info!("web: connection {c:?} {why}");
+                }
+                ToUi::Error(e) => warn!("web: {e}"),
+                _ => {}
             }
         }
     });
@@ -166,6 +186,19 @@ async fn serve(dir: PathBuf, demo: bool, port: u16, invite: bool, tls: Option<(P
         published,
         gate: Mutex::new(Gate::default()),
         tabs: Mutex::new(HashSet::new()),
+        wa: proxy.clone(),
+        open,
+        parked: Mutex::new(HashMap::new()),
+        attached: Mutex::new(HashMap::new()),
+        connections: std::sync::atomic::AtomicU64::new(0),
+    });
+    // The tabs whose page didn't come back in time, or whose session is gone, end.
+    let reaper = web.clone();
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            reaper.reap().await;
+        }
     });
     let base = web.published.as_ref().map(|p| p.0.clone()).unwrap_or_else(|| format!("http://localhost:{port}"));
     println!("{}", t("webListening", &[&base]));
@@ -331,14 +364,23 @@ struct Challenge {
     invite: Option<String>,
 }
 
+/// The code sent to my own chat to sign in with: its digits, until when it's good, the wrong tries it has left.
+struct Code {
+    digits: String,
+    expires: i64,
+    tries: u8,
+}
+
 /// What's kept in memory only: the registration links not used yet, the challenges handed out, the attempts at
-/// signing in or registering in the last minute (past 30, refused). Its lock is also held while the passkeys and the
-/// sessions are read and written back.
+/// signing in or registering in the last minute (past 30, refused), the code to sign in with and when it went. Its
+/// lock is also held while the passkeys and the sessions are read and written back.
 #[derive(Default)]
 struct Gate {
     invites: HashMap<String, i64>,
     challenges: HashMap<String, Challenge>,
     attempts: Vec<i64>,
+    code: Option<Code>,
+    code_sent: i64,
 }
 
 /// The server: the store with the state table, the folders, where it's published, and the tabs' processes.
@@ -351,6 +393,30 @@ struct Web {
     published: Option<(String, String)>,
     gate: Mutex<Gate>,
     tabs: Mutex<HashSet<u32>>,
+    /// The WhatsApp connection, which the codes to sign in with go out on (none in the demonstration), and whether
+    /// it's open.
+    wa: Option<Arc<crate::ipc::Proxy>>,
+    open: Arc<AtomicBool>,
+    /// The browsers' tabs by their id: those waiting for their page (until when), and those with a connection (which
+    /// one, and how to make it let the tab go, to the same session's page come back on another).
+    parked: Mutex<HashMap<String, (Running, i64)>>,
+    attached: Mutex<HashMap<String, Holder>>,
+    connections: std::sync::atomic::AtomicU64,
+}
+
+/// A browser's tab running: its process, what goes to it and what it says, and whose session it is (its hash).
+struct Running {
+    child: Child,
+    stdin: ChildStdin,
+    lines: tokio::io::Lines<BufReader<tokio::net::unix::pipe::Receiver>>,
+    session: String,
+}
+
+/// The connection a tab is on: its number, the session, and the way to make it let the tab go.
+struct Holder {
+    connection: u64,
+    session: String,
+    release: tokio::sync::oneshot::Sender<()>,
 }
 
 /// The origin the browser is on, the passkeys' relying party (its host name) and whether it's over HTTPS.
@@ -369,6 +435,20 @@ fn random(bytes: usize) -> String {
     let mut b = vec![0u8; bytes];
     ring::rand::SecureRandom::fill(&ring::rand::SystemRandom::new(), &mut b).expect("the system's random numbers");
     URL_SAFE_NO_PAD.encode(b)
+}
+
+/// Six random digits, each of the million as likely as the others.
+fn digits() -> String {
+    let rng = ring::rand::SystemRandom::new();
+    loop {
+        let mut b = [0u8; 4];
+        ring::rand::SecureRandom::fill(&rng, &mut b).expect("the system's random numbers");
+        let n = u32::from_be_bytes(b);
+        // Below the last whole million, so that none comes up more often.
+        if n < u32::MAX - u32::MAX % 1_000_000 {
+            return format!("{:06}", n % 1_000_000);
+        }
+    }
 }
 
 fn hash(token: &str) -> String {
@@ -632,6 +712,7 @@ fn from_page(text: &str) -> Option<(String, bool)> {
         "size" => json!({ "t": "size", "cols": bound(&m["cols"], 80.0, 10.0, 500.0), "rows": bound(&m["rows"], 24.0, 5.0, 300.0) }),
         "in" => json!({ "t": "in", "d": m.get("d")?.as_str()? }),
         "ack" => json!({ "t": "ack" }),
+        "scroll" => json!({ "t": "scroll", "top": m.get("top")?.as_f64()?.floor().clamp(0.0, 10_000_000.0) as u64, "id": m.get("id")?.as_u64()? }),
         _ => return None,
     };
     Some((format!("{line}\n"), m["t"] == "size"))
@@ -783,7 +864,7 @@ impl Web {
         let mut passkeys: Vec<Passkey> = self.state(PASSKEYS);
         let signed_in = self.session_held(headers);
         if route == "state" {
-            return send(StatusCode::OK, json!({ "in": signed_in.is_some(), "passkeys": passkeys.len() }), None);
+            return send(StatusCode::OK, json!({ "in": signed_in.is_some(), "passkeys": passkeys.len(), "code": self.wa.is_some() }), None);
         }
         if !post {
             return error(StatusCode::METHOD_NOT_ALLOWED, "method");
@@ -896,6 +977,39 @@ impl Web {
                 self.set_state(PASSKEYS, &passkeys);
                 send(StatusCode::OK, json!({ "ok": true }), Some(sign_in()))
             }
+            "code/send" => {
+                let Some(wa) = &self.wa else { return error(StatusCode::NOT_FOUND, "route") };
+                let me = self.store.state("me").filter(|m| !m.is_empty());
+                let (Some(me), true) = (me, self.open.load(Ordering::Relaxed)) else { return error(StatusCode::SERVICE_UNAVAILABLE, "offline") };
+                let now = now_ms();
+                if now - gate.code_sent < CODE_EVERY_MS {
+                    return error(StatusCode::TOO_MANY_REQUESTS, "wait");
+                }
+                let code = digits();
+                wa.send(&me, &t("webCode", &[&code]), None, &[]);
+                info!("web: a code to sign in sent, asked from {}", device_of(headers));
+                gate.code = Some(Code { digits: code, expires: now + CODE_MS, tries: CODE_TRIES });
+                gate.code_sent = now;
+                send(StatusCode::OK, json!({ "ok": true }), None)
+            }
+            "code/verify" => {
+                let typed: String = body.get("code").and_then(Value::as_str).unwrap_or("").chars().filter(char::is_ascii_digit).collect();
+                let Some(code) = gate.code.as_mut().filter(|c| c.expires > now_ms()) else {
+                    gate.code = None;
+                    return error(StatusCode::BAD_REQUEST, "expired");
+                };
+                if typed != code.digits {
+                    code.tries -= 1;
+                    if code.tries == 0 {
+                        gate.code = None;
+                        return error(StatusCode::BAD_REQUEST, "spent");
+                    }
+                    return error(StatusCode::BAD_REQUEST, "wrong");
+                }
+                gate.code = None;
+                info!("web: signed in with a code, from {}", device_of(headers));
+                send(StatusCode::OK, json!({ "ok": true }), Some(sign_in()))
+            }
             _ => error(StatusCode::NOT_FOUND, "route"),
         }
     }
@@ -903,11 +1017,14 @@ impl Web {
     /// A tab's WebSocket: only the page itself, signed in; the browser says where from, and the cookie who.
     fn upgrade(self: &Arc<Self>, mut req: Request<Incoming>, o: &Origin) -> Response<Body> {
         let h = req.headers();
-        if req.uri().path() != "/tab" || header(h, header::ORIGIN) != Some(o.origin.as_str()) || self.session(h).is_none() {
+        let session = self.session(h).map(|t| hash(&t));
+        let (true, true, Some(session)) = (req.uri().path() == "/tab", header(h, header::ORIGIN) == Some(o.origin.as_str()), session) else {
             let mut r = empty(StatusCode::UNAUTHORIZED);
             r.headers_mut().insert(header::CONNECTION, HeaderValue::from_static("close"));
             return r;
-        }
+        };
+        // The tab a page comes back to, by its id.
+        let resume = query_param(req.uri().query().unwrap_or(""), "resume").filter(|r| !r.is_empty() && r.len() <= 64 && r.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_'));
         let websocket = header(h, header::UPGRADE).is_some_and(|u| u.eq_ignore_ascii_case("websocket"));
         let version = header(h, header::SEC_WEBSOCKET_VERSION) == Some("13");
         let (true, true, Some(key)) = (websocket, version, h.get(header::SEC_WEBSOCKET_KEY)) else { return empty(StatusCode::BAD_REQUEST) };
@@ -919,7 +1036,7 @@ impl Web {
                 Ok(io) => {
                     let config = WebSocketConfig::default().max_message_size(Some(1 << 20)).max_frame_size(Some(1 << 20));
                     let ws = WebSocketStream::from_raw_socket(TokioIo::new(io), Role::Server, Some(config)).await;
-                    web.tab(ws).await;
+                    web.tab(ws, session, resume).await;
                 }
                 Err(e) => warn!("web: upgrade: {e}"),
             }
@@ -933,15 +1050,40 @@ impl Web {
             .unwrap_or_else(|_| empty(StatusCode::INTERNAL_SERVER_ERROR))
     }
 
-    /// A browser's tab: wassup itself (`--web-tab`), started once the page says its size, and its messages both
-    /// ways, one per line: the page's to its stdin, checked first, and its own, from descriptor 3, as they come
-    /// (webtab.rs). No Herdr nor tmux, whatever the server was started in.
-    async fn tab(&self, ws: WebSocketStream<TokioIo<Upgraded>>) {
+    /// A browser's tab: wassup itself (`--web-tab`), started once the page says its size, or the one the page had,
+    /// come back to it (`resume`); and its messages both ways, one per line: the page's to its stdin, checked first,
+    /// and its own, from descriptor 3, as they come (webtab.rs). No Herdr nor tmux, whatever the server was started
+    /// in. The connection gone without the tab ending, it waits for its page a while (`PARKED_MS`); taken by the same
+    /// session's page on another connection, it's let go to it.
+    async fn tab(&self, ws: WebSocketStream<TokioIo<Upgraded>>, session: String, resume: Option<String>) {
         let (mut sink, mut stream) = ws.split();
-        let mut child: Option<Child> = None;
-        let mut stdin: Option<ChildStdin> = None;
-        let mut lines: Option<tokio::io::Lines<BufReader<tokio::net::unix::pipe::Receiver>>> = None;
+        let connection = self.connections.fetch_add(1, Ordering::Relaxed);
+        let mut run: Option<Running> = None;
+        let mut id = String::new();
+        let mut release: Option<tokio::sync::oneshot::Receiver<()>> = None;
+        // Until the tab says it's starting again, what it said is for the page that went.
+        let mut skipping = false;
+        if let Some(r) = resume
+            && let Some(mut t) = self.take(&r, &session).await
+        {
+            let again = format!("{AGAIN}\n");
+            if t.stdin.write_all(again.as_bytes()).await.is_ok() {
+                info!("web: a tab taken up again");
+                skipping = true;
+                id = r;
+                run = Some(t);
+            }
+        }
+        if run.is_some() {
+            release = Some(self.hold(&id, connection, &session));
+            if sink.send(Message::text(json!({ "t": "tab", "id": id }).to_string())).await.is_err() {
+                self.let_go(&id, run.take(), false).await;
+                return;
+            }
+        }
         let mut ping = tokio::time::interval_at(tokio::time::Instant::now() + Duration::from_secs(30), Duration::from_secs(30));
+        // Whether the tab ended, or couldn't start.
+        let mut ended = false;
         loop {
             tokio::select! {
                 m = stream.next() => {
@@ -952,39 +1094,64 @@ impl Web {
                         _ => break,
                     };
                     let Some((line, size)) = from_page(&text) else { continue };
-                    if child.is_none() && size {
+                    if run.is_none() && size {
                         match self.spawn_tab() {
-                            Ok((c, i, l)) => (child, stdin, lines) = (Some(c), Some(i), Some(l)),
+                            Ok((child, stdin, lines)) => {
+                                run = Some(Running { child, stdin, lines, session: session.clone() });
+                                id = random(16);
+                                release = Some(self.hold(&id, connection, &session));
+                                if sink.send(Message::text(json!({ "t": "tab", "id": id }).to_string())).await.is_err() {
+                                    break;
+                                }
+                            }
                             Err(e) => {
                                 warn!("web: tab: {e}");
+                                ended = true;
                                 break;
                             }
                         }
                     }
-                    if let Some(i) = stdin.as_mut() {
-                        let _ = i.write_all(line.as_bytes()).await;
+                    if let Some(t) = run.as_mut() {
+                        let _ = t.stdin.write_all(line.as_bytes()).await;
                     }
                 }
                 l = async {
-                    match lines.as_mut() {
-                        Some(l) => l.next_line().await,
+                    match run.as_mut() {
+                        Some(t) => t.lines.next_line().await,
                         None => std::future::pending().await,
                     }
                 } => match l {
                     Ok(Some(l)) => {
+                        if skipping {
+                            skipping = l != AGAIN;
+                            continue;
+                        }
                         if sink.send(Message::text(l)).await.is_err() {
                             break;
                         }
                     }
                     // Once its output is all read: the last thing it said may be to sign out.
                     _ => {
-                        if let Some(c) = child.as_mut() {
-                            let _ = tokio::time::timeout(Duration::from_secs(5), c.wait()).await;
+                        if let Some(t) = run.as_mut() {
+                            let _ = tokio::time::timeout(Duration::from_secs(5), t.child.wait()).await;
                         }
                         let _ = sink.send(Message::Close(Some(CloseFrame { code: CloseCode::Normal, reason: "".into() }))).await;
+                        ended = true;
                         break;
                     }
                 },
+                _ = async {
+                    match release.as_mut() {
+                        Some(r) => {
+                            let _ = r.await;
+                        }
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    // The same session's page came back on another connection: this one, left behind, lets it go.
+                    let _ = sink.send(Message::text(json!({ "t": "taken" }).to_string())).await;
+                    break;
+                }
                 _ = ping.tick() => {
                     if sink.send(Message::Ping(Bytes::new())).await.is_err() {
                         break;
@@ -992,19 +1159,103 @@ impl Web {
                 }
             }
         }
-        drop(stdin);
-        if let Some(mut c) = child {
-            // Its id is gone once it's reaped.
-            if let Some(pid) = c.id() {
-                // SAFETY: a signal to the tab's own process, which this task holds and hasn't reaped yet.
-                unsafe {
-                    libc::kill(pid as libc::pid_t, libc::SIGTERM);
-                }
-                let _ = c.wait().await;
-                self.tabs.lock().unwrap().remove(&pid);
+        // No longer held by this connection, unless another has taken it meanwhile.
+        {
+            let mut attached = self.attached.lock().unwrap();
+            if attached.get(&id).is_some_and(|h| h.connection == connection) {
+                attached.remove(&id);
             }
         }
+        self.let_go(&id, run, ended).await;
         let _ = sink.close().await;
+    }
+
+    /// The tab `id` held by connection `connection`: the way it's told to let it go.
+    fn hold(&self, id: &str, connection: u64, session: &str) -> tokio::sync::oneshot::Receiver<()> {
+        let (release, released) = tokio::sync::oneshot::channel();
+        self.attached.lock().unwrap().insert(id.to_string(), Holder { connection, session: session.to_string(), release });
+        released
+    }
+
+    /// A tab its connection is done with: one that ended is reaped; else it waits for its page, while its session
+    /// lasts.
+    async fn let_go(&self, id: &str, run: Option<Running>, ended: bool) {
+        let Some(t) = run else { return };
+        if !ended && !id.is_empty() && self.session_alive(&t.session) {
+            self.parked.lock().unwrap().insert(id.to_string(), (t, now_ms() + PARKED_MS));
+            return;
+        }
+        self.end_tab(t).await;
+    }
+
+    /// The tab `id` for the page of `session` come back to it: waiting for it, or still held by the connection the
+    /// page had (a phone's left behind can last a while), which is made to let it go. None when there's none, or
+    /// another session's.
+    async fn take(&self, id: &str, session: &str) -> Option<Running> {
+        let mut asked = false;
+        for _ in 0..40 {
+            {
+                let mut parked = self.parked.lock().unwrap();
+                if parked.get(id).is_some_and(|(t, _)| t.session == session) {
+                    return parked.remove(id).map(|(t, _)| t);
+                }
+            }
+            if !asked {
+                let holder = {
+                    let mut attached = self.attached.lock().unwrap();
+                    match attached.get(id) {
+                        Some(h) if h.session == session => attached.remove(id),
+                        _ => None,
+                    }
+                };
+                match holder {
+                    Some(h) => {
+                        let _ = h.release.send(());
+                        asked = true;
+                    }
+                    None => return None,
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        None
+    }
+
+    /// Whether the session with this hash is still signed in.
+    fn session_alive(&self, session: &str) -> bool {
+        let _gate = self.gate.lock().unwrap();
+        let all: HashMap<String, Session> = self.state(SESSIONS);
+        all.get(session).is_some_and(|s| now_ms() - s.seen <= IDLE_MS)
+    }
+
+    /// Ends the tabs that waited for their page in vain, or whose session is gone.
+    async fn reap(&self) {
+        let now = now_ms();
+        let due: Vec<String> = self.parked.lock().unwrap().iter().filter(|(_, (_, until))| *until < now).map(|(id, _)| id.clone()).collect();
+        let parked: Vec<(String, String)> = self.parked.lock().unwrap().iter().map(|(id, (t, _))| (id.clone(), t.session.clone())).collect();
+        let gone: Vec<String> = parked.into_iter().filter(|(_, s)| !self.session_alive(s)).map(|(id, _)| id).collect();
+        for id in due.into_iter().chain(gone) {
+            let t = self.parked.lock().unwrap().remove(&id);
+            if let Some((t, _)) = t {
+                info!("web: a tab whose page didn't come back ends");
+                self.end_tab(t).await;
+            }
+        }
+    }
+
+    /// Ends a tab's process and reaps it.
+    async fn end_tab(&self, t: Running) {
+        let Running { mut child, stdin, .. } = t;
+        drop(stdin);
+        // Its id is gone once it's reaped.
+        if let Some(pid) = child.id() {
+            // SAFETY: a signal to the tab's own process, which this holds and hasn't reaped yet.
+            unsafe {
+                libc::kill(pid as libc::pid_t, libc::SIGTERM);
+            }
+            let _ = child.wait().await;
+            self.tabs.lock().unwrap().remove(&pid);
+        }
     }
 
     /// Starts a tab: its stdin for the page's messages, its stderr to the log, a pipe on its descriptor 3 for its own.
@@ -1597,6 +1848,8 @@ mod tests {
         assert_eq!(from_page(r#"{"t":"in","d":"\u001b[A"}"#).map(|l| l.1), Some(false));
         assert_eq!(from_page(r#"{"t":"in","d":3}"#), None);
         assert_eq!(from_page(r#"{"t":"other"}"#), None);
+        assert_eq!(from_page(r#"{"t":"scroll","top":-3,"id":2}"#).map(|l| l.0), Some("{\"id\":2,\"t\":\"scroll\",\"top\":0}\n".into()));
+        assert_eq!(from_page(r#"{"t":"scroll"}"#), None);
         assert_eq!(from_page("not json"), None);
     }
 
@@ -1605,5 +1858,63 @@ mod tests {
         let mut h = HeaderMap::new();
         h.insert(header::USER_AGENT, HeaderValue::from_static("Mozilla/5.0 (X11; Linux x86_64; rv:140.0) Gecko/20100101 Firefox/140.0"));
         assert_eq!(device_of(&h), "Firefox · Linux");
+    }
+
+    /// A code to sign in with: each wrong one takes a try and the fifth voids it; the right one signs in, once, spaces
+    /// and all; one past its 5 minutes doesn't; with no connection to send it on, there's none to ask for.
+    #[test]
+    fn code_sign_in() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("target").join(format!("web-code-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let web = Web {
+            store: Arc::new(Store::open(&dir.join("wassup.db")).unwrap()),
+            media: dir.join("media"),
+            dir: dir.clone(),
+            demo: false,
+            published: None,
+            gate: Mutex::new(Gate::default()),
+            tabs: Mutex::new(HashSet::new()),
+            wa: None,
+            open: Arc::new(AtomicBool::new(true)),
+            parked: Mutex::new(HashMap::new()),
+            attached: Mutex::new(HashMap::new()),
+            connections: std::sync::atomic::AtomicU64::new(0),
+        };
+        let o = Origin { origin: "http://localhost:8799".into(), rp_id: "localhost".into(), secure: false };
+        // The answer's status and whether it signs in (a session's cookie).
+        let ask = |route: &str, code: &str| {
+            let mut gate = web.gate.lock().unwrap();
+            let res = web.api_held(&mut gate, route, true, &HeaderMap::new(), Some(json!({ "code": code })), &o);
+            (res.status(), res.headers().get(header::SET_COOKIE).is_some_and(|c| c.to_str().unwrap().starts_with("wa_s=")))
+        };
+        let give = |expires: i64| web.gate.lock().unwrap().code = Some(Code { digits: "123456".into(), expires, tries: CODE_TRIES });
+        let tries = || web.gate.lock().unwrap().code.as_ref().map(|c| c.tries);
+        let refused = (StatusCode::BAD_REQUEST, false);
+
+        assert_eq!(ask("code/send", ""), (StatusCode::NOT_FOUND, false));
+        assert_eq!(ask("code/verify", "123456"), refused);
+
+        give(now_ms() + CODE_MS);
+        for _ in 1..CODE_TRIES {
+            assert_eq!(ask("code/verify", "654321"), refused);
+        }
+        assert_eq!(tries(), Some(1));
+        assert_eq!(ask("code/verify", " 123 456 "), (StatusCode::OK, true));
+        assert_eq!(tries(), None);
+        assert_eq!(ask("code/verify", "123456"), refused);
+
+        give(now_ms() + CODE_MS);
+        for _ in 0..CODE_TRIES {
+            assert_eq!(ask("code/verify", "000000"), refused);
+        }
+        assert_eq!(tries(), None);
+        assert_eq!(ask("code/verify", "123456"), refused);
+
+        give(now_ms() - 1);
+        assert_eq!(ask("code/verify", "123456"), refused);
+
+        let d = digits();
+        assert!(d.len() == 6 && d.bytes().all(|b| b.is_ascii_digit()));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -107,6 +107,7 @@ fn strings(key: &str) -> (&'static str, &'static str) {
         "searchNone" => ("sem resultados", "no results"),
         "webListening" => ("wassup na web em {0}", "wassup on the web at {0}"),
         "webInvite" => ("Registar uma passkey (uso único, 15 minutos): {0}", "Register a passkey (single use, 15 minutes): {0}"),
+        "webCode" => ("Código para entrar no wassup na web: {0}. Vale 5 minutos.", "Code to sign in to wassup on the web: {0}. It's good for 5 minutes."),
         "demo" => ("demonstração", "demonstration"),
         "connected" => ("ligado", "connected"),
         "deletedLine" => ("⊘ mensagem apagada", "⊘ message deleted"),

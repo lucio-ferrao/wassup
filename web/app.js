@@ -1,6 +1,7 @@
 // wassup in a browser: wassup itself, running on the server (web.rs), sends its screen cell by cell (webtab.rs) and
-// this page draws it in HTML; keys, clicks and the wheel go back as a terminal would send them. Signed in by passkey; a
-// registration link (?invite=…) adds one.
+// this page draws it in HTML, the open chat whole, which it scrolls itself; keys, clicks and the wheel go back as a
+// terminal would send them. Signed in by passkey, or by a code sent to my own chat; a registration link (?invite=…)
+// adds a passkey.
 
 // Passkeys with the browser's own WebAuthn: the server's options come as JSON, their binary fields in base64url, and
 // what the device answers goes back the same way (as simplewebauthn's browser side does).
@@ -40,7 +41,11 @@ const T = pt ? {
   register: 'Regista uma passkey neste dispositivo: a impressão digital, a cara ou o PIN dele passam a abrir o wassup.', registerButton: 'Registar passkey',
   none: 'Ainda não há passkeys. Abre a ligação de registo que o «wa --web» mostra no terminal.',
   noWebauthn: 'Este navegador não suporta passkeys.',
-  failed: 'Não deu: ', gone: 'A ligação ao wassup terminou.', again: 'Voltar a ligar',
+  orCode: 'Ou entra com um código, que te envio para a conversa contigo próprio no WhatsApp.',
+  codeButton: 'Receber código no WhatsApp', codeEnter: 'Entrar',
+  codeSent: 'Enviei-te um código para a conversa contigo próprio no WhatsApp. Escreve-o aqui:',
+  failed: 'Não deu: ', again: 'Voltar a ligar', reconnecting: 'a voltar a ligar…',
+  taken: 'Este wassup continuou noutra aba do navegador.',
   addDevice: 'Adicionar dispositivo', signOut: 'Sair',
   invite: 'Abre esta ligação no outro dispositivo, ou lê o código, nos próximos 15 minutos. Só serve uma vez.',
   attachment: 'Abrir anexo', link: 'Abrir ligação',
@@ -52,13 +57,22 @@ const T = pt ? {
     unknown: 'Esta passkey não está registada neste wassup.',
     none: 'Ainda não há passkeys registadas.',
     busy: 'Demasiadas tentativas. Espera um minuto.',
+    offline: 'O wassup não está ligado ao WhatsApp agora. Tenta daqui a pouco.',
+    wait: 'Já te enviei um código há menos de um minuto: usa esse, ou espera um pouco.',
+    expired: 'O código já não vale: expirou (dura 5 minutos) ou já foi usado. Pede outro.',
+    wrong: 'O código não está certo.',
+    spent: 'Demasiadas tentativas erradas: o código foi anulado. Pede outro.',
   },
 } : {
   login: "Sign in with this device's passkey.", loginButton: 'Sign in with passkey',
   register: "Register a passkey on this device: its fingerprint, face or PIN will open wassup.", registerButton: 'Register passkey',
   none: 'There are no passkeys yet. Open the registration link "wa --web" shows in the terminal.',
   noWebauthn: "This browser doesn't support passkeys.",
-  failed: "Didn't work: ", gone: 'The connection to wassup ended.', again: 'Connect again',
+  orCode: "Or sign in with a code, which I'll send to your chat with yourself on WhatsApp.",
+  codeButton: 'Get a code on WhatsApp', codeEnter: 'Sign in',
+  codeSent: 'I sent you a code in your chat with yourself on WhatsApp. Type it here:',
+  failed: "Didn't work: ", again: 'Connect again', reconnecting: 'reconnecting…',
+  taken: 'This wassup went on in another browser tab.',
   addDevice: 'Add a device', signOut: 'Sign out',
   invite: 'Open this link on the other device, or scan the code, within 15 minutes. It works once.',
   attachment: 'Open attachment', link: 'Open link',
@@ -69,6 +83,11 @@ const T = pt ? {
     unknown: "This passkey isn't registered with this wassup.",
     none: 'There are no passkeys registered yet.',
     busy: 'Too many attempts. Wait a minute.',
+    offline: "wassup isn't connected to WhatsApp right now. Try again shortly.",
+    wait: 'A code went less than a minute ago: use that one, or wait a little.',
+    expired: 'The code is no longer valid: it expired (it lasts 5 minutes) or was already used. Ask for another.',
+    wrong: "The code isn't right.",
+    spent: 'Too many wrong tries: the code was cancelled. Ask for another.',
   },
 }
 
@@ -97,29 +116,57 @@ async function post(url, body) {
   return data
 }
 
-/** The page before wassup: a line and, when there's something to do, one button that does it. */
-function door(text, button, action) {
+/** What a button on the page before wassup does, the button held down meanwhile and what went wrong said under it. */
+async function attempt(b, action) {
+  b.disabled = true
+  $('door-error').textContent = ''
+  try { await action() } catch (e) { $('door-error').textContent = T.errors[e.message] ?? T.failed + (e.message || e) } finally { b.disabled = false }
+}
+
+/**
+ * The page before wassup: a line and, when there's something to do, one button that does it; with `code`, also the
+ * way in by a code the server sends to my own chat on WhatsApp, and the field to type it in once it's gone.
+ */
+function door(text, button, action, code = false) {
   document.title = 'wassup'
   setIcon(APP_ICON)
   $('term').hidden = true
   $('door').hidden = false
   $('door-text').textContent = text
   $('door-error').textContent = ''
-  const b = $('door-button')
+  const b = $('door-button'), c = $('door-code'), form = $('door-form'), field = $('door-input'), enter = $('door-enter')
   b.hidden = !button
-  if (!button) return
-  b.textContent = button
-  b.onclick = async () => {
-    b.disabled = true
-    try { await action() } catch (e) { $('door-error').textContent = T.errors[e.message] ?? T.failed + (e.message || e) } finally { b.disabled = false }
+  c.hidden = !code
+  form.hidden = true
+  if (button) {
+    b.textContent = button
+    b.onclick = () => attempt(b, action)
   }
+  if (!code) return
+  c.textContent = T.codeButton
+  enter.textContent = T.codeEnter
+  c.onclick = () => attempt(c, async () => {
+    await post('/api/code/send')
+    $('door-text').textContent = T.codeSent
+    form.hidden = false
+    field.value = ''
+    field.focus()
+  })
+  const signIn = () => attempt(enter, async () => {
+    await post('/api/code/verify', { code: field.value })
+    start()
+  })
+  enter.onclick = signIn
+  field.onkeydown = e => { if (e.key === 'Enter') signIn() }
 }
 
 async function main() {
   const state = await (await fetch('/api/state')).json()
   const invite = new URLSearchParams(location.search).get('invite')
   if (state.in && !invite) return start()
-  if (!browserSupportsWebAuthn()) return door(T.noWebauthn)
+  // The code is offered wherever the server can send one (not in the demonstration).
+  const orCode = text => (state.code ? `${text} ${T.orCode}` : text)
+  if (!browserSupportsWebAuthn()) return door(orCode(T.noWebauthn), null, null, state.code)
   if (invite) {
     return door(T.register, T.registerButton, async () => {
       const options = await post('/api/register/options', { invite })
@@ -129,13 +176,13 @@ async function main() {
       start()
     })
   }
-  if (!state.passkeys) return door(T.none)
-  door(T.login, T.loginButton, async () => {
+  if (!state.passkeys) return door(orCode(T.none), null, null, state.code)
+  door(orCode(T.login), T.loginButton, async () => {
     const options = await post('/api/login/options')
     const response = await startAuthentication({ optionsJSON: options })
     await post('/api/login/verify', response)
     start()
-  })
+  }, state.code)
 }
 
 /**
@@ -236,9 +283,14 @@ function start() {
   $('menu-button').hidden = false
   $('keys').hidden = !touch
   const term = $('term'), grid = $('grid'), picsLayer = $('pics'), input = $('input')
+  const panel = $('panel'), panelGrid = $('panel-grid'), panelPics = $('panel-pics')
   term.style.fontSize = `${touch ? 13 : 15}px`
 
-  const ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/tab`)
+  // The tab on the server this page had, if any (kept by the browser for this tab of its own, over a reload): the
+  // connection comes back to it, where it was.
+  const stored = { get: () => { try { return sessionStorage.getItem('wassup-tab') } catch { return null } }, set: v => { try { v ? sessionStorage.setItem('wassup-tab', v) : sessionStorage.removeItem('wassup-tab') } catch {} } }
+  const resume = stored.get()
+  const ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/tab${resume ? `?resume=${encodeURIComponent(resume)}` : ''}`)
   const say = m => { if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(m)) }
   const send = d => say({ t: 'in', d })
 
@@ -264,13 +316,18 @@ function start() {
     say({ t: 'size', cols, rows })
   }
   measure()
-  document.fonts?.ready.then(() => { measure(); fit() })
+  document.fonts?.ready.then(() => { measure(); placePanel(); fit() })
   new ResizeObserver(() => fit()).observe(term)
 
   // The frames: the rows that changed, in runs of [cells, text, style], the styles not seen before, and the pictures.
   const sheet = (() => { const s = document.createElement('style'); document.head.append(s); return s.sheet })()
   let lines = []
   const sources = new Map(), bold = new Set()
+  const lineHtml = runs => {
+    let html = ''
+    for (let i = 0; i < runs.length; i += 3) html += runHtml(runs[i], runs[i + 1], runs[i + 2], bold.has(runs[i + 2]))
+    return html
+  }
   const frame = m => {
     if (m.cols) {
       grid.textContent = ''
@@ -285,26 +342,61 @@ function start() {
     }
     for (const [y, runs] of m.lines ?? []) {
       const line = lines[y]
-      if (!line) continue
-      let html = ''
-      for (let i = 0; i < runs.length; i += 3) html += runHtml(runs[i], runs[i + 1], runs[i + 2], bold.has(runs[i + 2]))
-      line.innerHTML = html
+      if (line) line.innerHTML = lineHtml(runs)
     }
     for (const [id, d] of Object.entries(m.defs ?? {})) sources.set(Number(id), d.file ? `/media?f=${encodeURIComponent(d.file)}` : `data:image/png;base64,${d.png}`)
-    if (m.pics) pictures(m.pics)
+    if (m.panel === null) { panel.hidden = true; panelAt = null }
+    else if (m.panel) chatPanel(m.panel)
+    if (m.pics) pictures(m.pics, picsLayer)
     say({ t: 'ack' })
   }
-  /** Each picture over its cells, cropped to the part in view; an emoji on its own, twice its size, in four cells by two. */
-  const pictures = list => {
+
+  // The open chat, or the chat list, which the page scrolls itself: every row and picture of it, as they change;
+  // where it goes on the screen and how many rows are in view; the row on top when wassup moved it (opening the chat,
+  // going to the end, a search, the list's selection), and once it was scrolled here, the row on top told to wassup
+  // (with the panel's number, a chat's not taken for the list's), which a click is then counted from.
+  let panelRows = [], panelAt = null, panelId = 0, reported = 0, scrollQueued = false
+  const placePanel = () => {
+    if (!panelAt) return
+    const { x, y, w, h } = panelAt
+    Object.assign(panel.style, { left: `${x * cw}px`, top: `${y * ch}px`, width: `${w * cw}px`, height: `${h * ch}px` })
+    panelGrid.style.width = `${w * cw}px`
+  }
+  const chatPanel = p => {
+    if (p.reset) { panelGrid.textContent = ''; panelPics.textContent = ''; panelRows = []; panelId = p.id }
+    if (p.x != null) { panelAt = { x: p.x, y: p.y, w: p.w, h: p.h }; placePanel() }
+    if (p.rows != null) {
+      while (panelRows.length < p.rows) panelRows.push(panelGrid.appendChild(document.createElement('div')))
+      while (panelRows.length > p.rows) panelRows.pop().remove()
+    }
+    for (const [y, runs] of p.lines ?? []) {
+      const line = panelRows[y]
+      if (line) line.innerHTML = lineHtml(runs)
+    }
+    if (p.pics) pictures(p.pics, panelPics)
+    panel.hidden = false
+    if (p.scroll != null) { reported = p.top; panel.scrollTop = p.top * ch }
+  }
+  const reportScroll = () => {
+    scrollQueued = false
+    const top = Math.round(panel.scrollTop / ch)
+    if (top !== reported) { reported = top; say({ t: 'scroll', top, id: panelId }) }
+  }
+  panel.addEventListener('scroll', () => { if (!scrollQueued) { scrollQueued = true; requestAnimationFrame(reportScroll) } }, { passive: true })
+  /**
+   * Each picture over its cells in `layer` (the screen's, or the chat's, by its row), cropped to the part in view; an
+   * emoji on its own, twice its size, in four cells by two.
+   */
+  const pictures = (list, layer) => {
     list.forEach((p, i) => {
-      let box = picsLayer.children[i]
+      let box = layer.children[i]
       const kind = p.emoji ? 'emoji' : 'pic'
       if (!box || box.dataset.kind !== kind) {
         const fresh = document.createElement('div')
         fresh.dataset.kind = kind
         fresh.className = kind
         if (!p.emoji) fresh.append(document.createElement('img'))
-        if (box) box.replaceWith(fresh); else picsLayer.append(fresh)
+        if (box) box.replaceWith(fresh); else layer.append(fresh)
         box = fresh
       }
       Object.assign(box.style, { left: `${p.x * cw}px`, top: `${p.y * ch}px`, width: `${(p.emoji ? 4 : p.w) * cw}px`, height: `${(p.emoji ? 2 : p.h) * ch}px` })
@@ -313,16 +405,43 @@ function start() {
       if (img.getAttribute('src') !== src) img.src = src
       Object.assign(img.style, { width: `${p.w * cw}px`, height: `${full}px`, top: `${-p.from * full}px` })
     })
-    while (picsLayer.children.length > list.length) picsLayer.lastChild.remove()
+    while (layer.children.length > list.length) layer.lastChild.remove()
   }
 
-  // Leaving wassup (Esc on the chat list, Ctrl+C) signs out; the connection ending otherwise offers to connect again.
-  let leaving = false
+  // Leaving wassup (Esc on the chat list, Ctrl+C) signs out. The connection gone otherwise (the phone put the page
+  // away, the network dropped, wassup restarted), it comes back by itself as soon as the page is in view, tried
+  // again every few seconds, to the same tab, which waits for it a while (web.rs); signed out meanwhile, to sign in.
+  let leaving = false, retrying = false
   ws.onopen = () => { cols = rows = 0; fit(); if (document.hasFocus()) send('\x1b[I') }
-  ws.onclose = () => { if (!leaving) door(T.gone, T.again, async () => location.reload()) }
+  const reconnect = async () => {
+    if (retrying || document.hidden) return
+    retrying = true
+    try {
+      const s = await (await fetch('/api/state', { cache: 'no-store' })).json()
+      if (s.in) location.reload(); else location.replace('/')
+    } catch {
+      retrying = false
+      setTimeout(reconnect, 3000)
+    }
+  }
+  ws.onclose = () => {
+    if (leaving) return
+    $('status').textContent = T.reconnecting
+    $('status').hidden = false
+    document.addEventListener('visibilitychange', reconnect)
+    reconnect()
+  }
   ws.onmessage = e => {
     const m = JSON.parse(e.data)
     if (m.t === 'frame') frame(m)
+    else if (m.t === 'tab') stored.set(m.id)
+    // The same tab taken up by another tab of the browser (one duplicated has this one's id): this one doesn't
+    // take it back by itself, which would have them take it from each other.
+    else if (m.t === 'taken') {
+      leaving = true
+      stored.set(null)
+      door(T.taken, T.again, async () => location.reload())
+    }
     else if (m.t === 'title') document.title = m.text || 'wassup'
     // The tab's icon, the chat's: its photo, its initials on its colour, or the app's.
     else if (m.t === 'icon') setIcon(m.photo ? `/media?f=${encodeURIComponent(m.photo)}` : m.initials ? initialsIcon(m.initials, m.color) : APP_ICON)
@@ -394,15 +513,34 @@ function start() {
   // Shift held it's the browser's, to select text and copy it.
   const cellAt = e => {
     const r = grid.getBoundingClientRect()
-    return `${Math.min(cols, Math.max(1, Math.floor((e.clientX - r.left) / cw) + 1))};${Math.min(rows, Math.max(1, Math.floor((e.clientY - r.top) / ch) + 1))}`
+    let y = Math.floor((e.clientY - r.top) / ch) + 1
+    // Over the chat the page scrolls, the row under the pointer counted from the one wassup has on top.
+    if (panelAt && !panel.hidden) {
+      const p = panel.getBoundingClientRect()
+      if (e.clientX >= p.left && e.clientX < p.right && e.clientY >= p.top && e.clientY < p.bottom) {
+        const row = Math.floor((e.clientY - p.top + panel.scrollTop) / ch) - reported
+        y = panelAt.y + 1 + Math.max(0, Math.min(panelAt.h - 1, row))
+      }
+    }
+    return `${Math.min(cols, Math.max(1, Math.floor((e.clientX - r.left) / cw) + 1))};${Math.min(rows, Math.max(1, y))}`
   }
+  const inPanel = e => !panel.hidden && panel.contains(e.target)
   const mods = e => (e.altKey ? 8 : 0) + (e.ctrlKey ? 16 : 0)
+  // On a phone the keyboard comes with the focus, and only when the focus changes: with the box holding it already
+  // (the keyboard put away, by the back gesture or by the phone, or the page loaded with no tap), focusing it again
+  // brings nothing, so it's let go of first and a tap on the screen always brings the keyboard back.
+  const keyboard = () => {
+    if (touch && document.activeElement === input) input.blur()
+    input.focus({ preventScroll: true })
+  }
   let button = -1, at = ''
   term.addEventListener('mousedown', e => {
     if (e.shiftKey) return
     e.preventDefault()
+    // Where the chat was scrolled to goes first, for the click to land on what's under it.
+    if (scrollQueued) reportScroll()
     getSelection()?.removeAllRanges()
-    input.focus({ preventScroll: true })
+    keyboard()
     button = e.button === 1 ? 1 : e.button === 2 ? 2 : 0
     at = cellAt(e)
     send(`\x1b[<${button + mods(e)};${at}M`)
@@ -423,6 +561,8 @@ function start() {
   // A notch for each line's height the wheel turns, as xterm.js counted them.
   let wheel = 0
   term.addEventListener('wheel', e => {
+    // Over the chat, the browser scrolls it.
+    if (inPanel(e)) return
     e.preventDefault()
     wheel += e.deltaMode === 1 ? e.deltaY * ch : e.deltaMode === 2 ? e.deltaY * rows * ch : e.deltaY
     const n = Math.max(-20, Math.min(20, Math.trunc(wheel / ch)))
@@ -437,7 +577,7 @@ function start() {
   term.addEventListener('touchstart', e => { lastY = e.touches.length === 1 ? e.touches[0].clientY : null }, { passive: true })
   term.addEventListener('touchend', () => { lastY = null })
   term.addEventListener('touchmove', e => {
-    if (lastY == null || e.touches.length !== 1) return
+    if (lastY == null || e.touches.length !== 1 || inPanel(e)) return
     e.preventDefault()
     const t = e.touches[0], steps = Math.trunc((t.clientY - lastY) / ch)
     if (!steps) return

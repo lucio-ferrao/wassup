@@ -11,17 +11,23 @@
 </head>
 <body>
   <main id="term" hidden>
-    <div id="screen"><div id="grid"></div><div id="pics"></div></div>
+    <div id="screen"><div id="grid"></div><div id="panel" hidden><div id="panel-grid"></div><div id="panel-pics"></div></div><div id="pics"></div></div>
     <textarea id="input" autocapitalize="off" autocomplete="off" autocorrect="off" spellcheck="false" aria-label="wassup"></textarea>
   </main>
   <section id="door" hidden>
     <h1>wassup 👾</h1>
     <p id="door-text"></p>
     <button id="door-button" type="button" hidden></button>
+    <button id="door-code" type="button" hidden></button>
+    <div id="door-form" hidden>
+      <input id="door-input" inputmode="numeric" autocomplete="one-time-code" maxlength="6" aria-label="código">
+      <button id="door-enter" type="button"></button>
+    </div>
     <p id="door-error" role="alert"></p>
   </section>
   <button id="menu-button" type="button" hidden aria-label="menu">⋯</button>
   <a id="toast" hidden target="_blank" rel="noopener"></a>
+  <p id="status" hidden role="status"></p>
   <nav id="keys" hidden>
     <button type="button" data-send="esc">Esc</button>
     <button type="button" data-send="tab">Tab</button>

@@ -4,14 +4,17 @@
 //! a tab, the time; under it the number, or the group's size). A filter takes the words in any order, accents aside,
 //! in the name or the number, the best matches at the bottom; Ctrl+F searches the messages of every chat instead.
 
+use std::sync::Arc;
+
 use ratatui::Frame;
+use ratatui::buffer::Buffer;
 use ratatui::layout::{Rect, Size};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::Paragraph;
+use ratatui::widgets::{Paragraph, Widget};
 use regex::Regex;
 
-use crate::app::{App, Hit, Slot};
+use crate::app::{App, Hit, Slot, WebPanel, WebPic};
 use crate::i18n::{lang, t};
 use crate::store::Chat;
 use crate::text::{self, theme};
@@ -227,6 +230,7 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
         app.list_area = body;
         refresh(app, rows);
         app.list_dirty = false;
+        app.list_gen += 1;
     }
     app.list_area = body;
     let len = app.slots.len();
@@ -251,124 +255,203 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
     let list = Rect { y: body.y + pad as u16, height: (end - start) as u16, ..body };
     app.list_area = Rect { y: list.y, height: list.height, ..body };
     app.list_top = start;
+    // A browser scrolls the list itself: moved from here, it's told to follow.
+    let web = app.web.is_some();
+    if web && app.page_top != Some(app.list_top) {
+        app.scroll_gen += 1;
+        app.page_top = Some(app.list_top);
+    }
     let width = (body.width as usize).saturating_sub(1);
     let time_cols = if !app.list_words.is_empty() || !app.hits_found.is_empty() { 12 } else { 5 };
     let end_col = width.saturating_sub(time_cols + 1);
-    let chosen = app.picker_chosen();
-    let sel_bg = theme().mine;
-    let strong = if theme().dark { Color::White } else { Color::Black };
     let font = app.picker.font_size();
     let cell = Size::new(font.width, font.height);
     let mut photos: Vec<(String, u16)> = Vec::new();
     for (k, i) in (start..end).enumerate() {
         let y = list.y + k as u16;
         let row = Rect { x: body.x + 1, y, width: body.width.saturating_sub(1), height: 1 };
-        let lit = chosen && (i == app.list_sel || matches!(app.slots[i], Slot::Bottom(_) | Slot::HitText(_)) && owner(app, i) == Some(app.list_sel));
-        let bg = if lit { sel_bg } else { Color::Reset };
-        match app.slots[i].clone() {
-            Slot::Day(label) => {
-                let label = format!("── {label} ──");
-                let lead = width.saturating_sub(text::width(&label)) / 2;
-                f.render_widget(Paragraph::new(Span::styled(format!("{}{label}", " ".repeat(lead)), Style::new().fg(theme().dim))), row);
+        let mut photo = false;
+        if let Slot::Top(c) | Slot::Bottom(c) = app.slots[i] {
+            let jid = app.filtered[c].jid.clone();
+            let top = matches!(app.slots[i], Slot::Top(_));
+            // The photo, four cells by two, once both rows are in view; the initials meanwhile or without one.
+            let both = if top { i + 1 < end } else { i > start };
+            photo = both && !app.caps.no_images && app.avatar(&jid).is_some();
+            if app.caps.no_images && app.is_open() && app.profile_asked.insert(jid.clone()) {
+                app.backend.ensure_profile(&jid);
             }
-            Slot::Blank => {}
-            Slot::Top(c) | Slot::Bottom(c) => {
-                let chat = app.filtered[c].clone();
-                let top = matches!(app.slots[i], Slot::Top(_));
-                let color = text::color_for(&chat.jid);
-                // The photo, four cells by two, once both rows are in view; the initials meanwhile or without one.
-                let both = if top { i + 1 < end } else { i > start };
-                let img = if both && !app.caps.no_images { app.avatar(&chat.jid) } else { None };
-                if app.caps.no_images && app.is_open() && app.profile_asked.insert(chat.jid.clone()) {
-                    app.backend.ensure_profile(&chat.jid);
-                }
-                if let Some(_img) = &img {
-                    if top {
-                        photos.push((chat.jid.clone(), y));
-                    }
-                    app.hits.push((row.x, y, 4, Hit::Photo(chat.jid.clone())));
-                }
-                let mut spans: Vec<Span<'static>> = Vec::new();
-                if img.is_some() {
-                    spans.push(Span::raw("    "));
-                } else {
-                    let cells = if top { format!(" {:<2} ", text::initials(&chat.name)) } else { "    ".into() };
-                    spans.push(Span::styled(cells, Style::new().bg(color).fg(Color::Reset).add_modifier(Modifier::BOLD)));
-                }
-                spans.push(Span::styled(" ", Style::new().bg(bg)));
+            if photo {
                 if top {
-                    let typing = app.typing.get(&chat.jid).is_some_and(|w| !w.is_empty());
-                    let mood = if typing { format!(" {}", App::typing_emoji()) } else { app.mood_of(&chat.jid, chat.last_ts) };
-                    let badge = if chat.unread > 0 { format!(" ({})", chat.unread) } else { String::new() };
-                    let eyes = if !text::is_group(&chat.jid) && app.online.contains(&chat.jid) && app.caps.utf8 { " 👀" } else { "" };
-                    let open = if app.tabs.contains(&chat.jid) { " ·" } else { "" };
-                    let room = end_col.saturating_sub(4 + 1 + 1 + text::width(&mood) + text::width(&badge) + text::width(eyes) + text::width(open)).max(4);
-                    let name = text::truncate(&crate::unicode::tame(&chat.name), room);
-                    let mut style = Style::new().bg(bg).fg(if lit { strong } else { color });
-                    if chat.unread > 0 || lit {
-                        style = style.add_modifier(Modifier::BOLD);
-                    }
-                    spans.extend(underlined(&name, &app.list_words, style));
-                    spans.push(Span::styled(mood.clone(), Style::new().bg(bg)));
-                    spans.push(Span::styled(badge.clone(), Style::new().bg(bg).fg(Color::Red).add_modifier(Modifier::BOLD)));
-                    spans.push(Span::styled(eyes, Style::new().bg(bg)));
-                    spans.push(Span::styled(open, Style::new().bg(bg).fg(theme().dim)));
-                    let used: usize = spans.iter().map(|s| text::width(&s.content)).sum();
-                    spans.push(Span::styled(" ".repeat(end_col.saturating_sub(used).max(1)), Style::new().bg(bg)));
-                    let when = if app.list_words.is_empty() { text::fmt_time(chat.last_ts) } else { crate::format::fmt_when_at(chat.last_ts, lang()) };
-                    let used: usize = spans.iter().map(|s| text::width(&s.content)).sum();
-                    spans.push(Span::raw(" ".repeat(width.saturating_sub(used + text::width(&when)).max(1))));
-                    spans.push(Span::styled(when, Style::new().fg(theme().faint)));
-                } else {
-                    let number = text::truncate(&chat_number(app, &chat), end_col.saturating_sub(6));
-                    spans.push(Span::styled(number, Style::new().bg(bg).fg(theme().dim)));
-                    let used: usize = spans.iter().map(|s| text::width(&s.content)).sum();
-                    spans.push(Span::styled(" ".repeat(end_col.saturating_sub(used)), Style::new().bg(bg)));
+                    photos.push((jid.clone(), y));
                 }
-                f.render_widget(Paragraph::new(Line::from(spans)), row);
-            }
-            Slot::Hit(h) => {
-                let m = app.hits_found[h].clone();
-                let color = text::color_for(&m.chat);
-                let who = if m.from_me { t("me", &[]) } else if text::is_group(&m.chat) { app.store.name_of(&m.sender) } else { String::new() };
-                let name = text::truncate(&app.store.name_of(&m.chat), end_col.saturating_sub(4).max(8));
-                let mut spans = vec![Span::styled(name, Style::new().bg(bg).fg(if lit { strong } else { color }).add_modifier(if lit { Modifier::BOLD } else { Modifier::empty() }))];
-                if !who.is_empty() {
-                    spans.push(Span::styled(format!(" · {}", text::truncate(&who, 24)), Style::new().bg(bg).fg(theme().dim)));
-                }
-                let used: usize = spans.iter().map(|s| text::width(&s.content)).sum();
-                spans.push(Span::styled(" ".repeat(end_col.saturating_sub(used).max(1)), Style::new().bg(bg)));
-                let when = crate::format::fmt_when(m.ts, lang());
-                let used: usize = spans.iter().map(|s| text::width(&s.content)).sum();
-                spans.push(Span::raw(" ".repeat(width.saturating_sub(used + text::width(&when)).max(1))));
-                spans.push(Span::styled(when, Style::new().fg(theme().faint)));
-                f.render_widget(Paragraph::new(Line::from(spans)), row);
-            }
-            Slot::HitText(l) => {
-                let mut spans = vec![Span::styled("    ", Style::new().bg(bg))];
-                let chars: Vec<char> = l.chars().collect();
-                let found = text::matches(&l, &app.list_words);
-                let mut at = 0;
-                for (a, b) in found {
-                    if a < at {
-                        continue;
-                    }
-                    spans.push(Span::styled(chars[at..a].iter().collect::<String>(), Style::new().bg(bg)));
-                    spans.push(Span::styled(chars[a..b].iter().collect::<String>(), Style::new().bg(bg).add_modifier(Modifier::REVERSED)));
-                    at = b;
-                }
-                spans.push(Span::styled(chars[at..].iter().collect::<String>(), Style::new().bg(bg)));
-                let used: usize = spans.iter().map(|s| text::width(&s.content)).sum();
-                spans.push(Span::styled(" ".repeat(end_col.saturating_sub(used)), Style::new().bg(bg)));
-                f.render_widget(Paragraph::new(Line::from(spans)), row);
+                app.hits.push((row.x, y, 4, Hit::Photo(jid)));
             }
         }
+        f.render_widget(Paragraph::new(slot_line(app, i, photo, width, end_col)), row);
     }
+    // A browser has every photo of the list from the panel (web_panel): those in view are drawn as in a terminal, for
+    // what that asks for, but not passed on twice.
+    let pics_before = app.web_pics.len();
     for (jid, y) in photos {
         if let Some(img) = app.avatar(&jid) {
             crate::chat::draw_whole(f, app, &format!("avatar:{jid}"), &img, Rect { x: body.x + 1, y, width: 4, height: 2 }, cell);
         }
     }
+    if web {
+        app.web_pics.truncate(pics_before);
+        app.web_panel = Some(web_panel(app, Rect { x: body.x, width: body.width, ..app.list_area }, width, end_col));
+    }
+}
+
+/// Slot `i` of the list as its line, from its first column on: a day's separator, a chat's two rows (its photo's
+/// four cells left blank for it with `photo`, else its initials on its colour; the name with its mood or someone
+/// typing, the unread count, 👀, "·" with a tab, the time; under it the number), a message found and its text. On the
+/// band's green up to its time when it's the one selected.
+fn slot_line(app: &App, i: usize, photo: bool, width: usize, end_col: usize) -> Line<'static> {
+    let chosen = app.picker_chosen();
+    let lit = chosen && (i == app.list_sel || matches!(app.slots[i], Slot::Bottom(_) | Slot::HitText(_)) && owner(app, i) == Some(app.list_sel));
+    let bg = if lit { theme().mine } else { Color::Reset };
+    let strong = if theme().dark { Color::White } else { Color::Black };
+    match app.slots[i].clone() {
+        Slot::Day(label) => {
+            let label = format!("── {label} ──");
+            let lead = width.saturating_sub(text::width(&label)) / 2;
+            Line::from(Span::styled(format!("{}{label}", " ".repeat(lead)), Style::new().fg(theme().dim)))
+        }
+        Slot::Blank => Line::from(""),
+        Slot::Top(c) | Slot::Bottom(c) => {
+            let chat = &app.filtered[c];
+            let top = matches!(app.slots[i], Slot::Top(_));
+            let color = text::color_for(&chat.jid);
+            let mut spans: Vec<Span<'static>> = Vec::new();
+            if photo {
+                spans.push(Span::raw("    "));
+            } else {
+                let cells = if top { format!(" {:<2} ", text::initials(&chat.name)) } else { "    ".into() };
+                spans.push(Span::styled(cells, Style::new().bg(color).fg(Color::Reset).add_modifier(Modifier::BOLD)));
+            }
+            spans.push(Span::styled(" ", Style::new().bg(bg)));
+            if top {
+                let typing = app.typing.get(&chat.jid).is_some_and(|w| !w.is_empty());
+                let mood = if typing { format!(" {}", App::typing_emoji()) } else { app.mood_of(&chat.jid, chat.last_ts) };
+                let badge = if chat.unread > 0 { format!(" ({})", chat.unread) } else { String::new() };
+                let eyes = if !text::is_group(&chat.jid) && app.online.contains(&chat.jid) && app.caps.utf8 { " 👀" } else { "" };
+                let open = if app.tabs.contains(&chat.jid) { " ·" } else { "" };
+                let room = end_col.saturating_sub(4 + 1 + 1 + text::width(&mood) + text::width(&badge) + text::width(eyes) + text::width(open)).max(4);
+                let name = text::truncate(&crate::unicode::tame(&chat.name), room);
+                let mut style = Style::new().bg(bg).fg(if lit { strong } else { color });
+                if chat.unread > 0 || lit {
+                    style = style.add_modifier(Modifier::BOLD);
+                }
+                spans.extend(underlined(&name, &app.list_words, style));
+                spans.push(Span::styled(mood.clone(), Style::new().bg(bg)));
+                spans.push(Span::styled(badge.clone(), Style::new().bg(bg).fg(Color::Red).add_modifier(Modifier::BOLD)));
+                spans.push(Span::styled(eyes, Style::new().bg(bg)));
+                spans.push(Span::styled(open, Style::new().bg(bg).fg(theme().dim)));
+                let used: usize = spans.iter().map(|s| text::width(&s.content)).sum();
+                spans.push(Span::styled(" ".repeat(end_col.saturating_sub(used).max(1)), Style::new().bg(bg)));
+                let when = if app.list_words.is_empty() { text::fmt_time(chat.last_ts) } else { crate::format::fmt_when_at(chat.last_ts, lang()) };
+                let used: usize = spans.iter().map(|s| text::width(&s.content)).sum();
+                spans.push(Span::raw(" ".repeat(width.saturating_sub(used + text::width(&when)).max(1))));
+                spans.push(Span::styled(when, Style::new().fg(theme().faint)));
+            } else {
+                let number = text::truncate(&chat_number(app, chat), end_col.saturating_sub(6));
+                spans.push(Span::styled(number, Style::new().bg(bg).fg(theme().dim)));
+                let used: usize = spans.iter().map(|s| text::width(&s.content)).sum();
+                spans.push(Span::styled(" ".repeat(end_col.saturating_sub(used)), Style::new().bg(bg)));
+            }
+            Line::from(spans)
+        }
+        Slot::Hit(h) => {
+            let m = &app.hits_found[h];
+            let color = text::color_for(&m.chat);
+            let who = if m.from_me { t("me", &[]) } else if text::is_group(&m.chat) { app.store.name_of(&m.sender) } else { String::new() };
+            let name = text::truncate(&app.store.name_of(&m.chat), end_col.saturating_sub(4).max(8));
+            let mut spans = vec![Span::styled(name, Style::new().bg(bg).fg(if lit { strong } else { color }).add_modifier(if lit { Modifier::BOLD } else { Modifier::empty() }))];
+            if !who.is_empty() {
+                spans.push(Span::styled(format!(" · {}", text::truncate(&who, 24)), Style::new().bg(bg).fg(theme().dim)));
+            }
+            let used: usize = spans.iter().map(|s| text::width(&s.content)).sum();
+            spans.push(Span::styled(" ".repeat(end_col.saturating_sub(used).max(1)), Style::new().bg(bg)));
+            let when = crate::format::fmt_when(m.ts, lang());
+            let used: usize = spans.iter().map(|s| text::width(&s.content)).sum();
+            spans.push(Span::raw(" ".repeat(width.saturating_sub(used + text::width(&when)).max(1))));
+            spans.push(Span::styled(when, Style::new().fg(theme().faint)));
+            Line::from(spans)
+        }
+        Slot::HitText(l) => {
+            let mut spans = vec![Span::styled("    ", Style::new().bg(bg))];
+            let chars: Vec<char> = l.chars().collect();
+            let found = text::matches(&l, &app.list_words);
+            let mut at = 0;
+            for (a, b) in found {
+                if a < at {
+                    continue;
+                }
+                spans.push(Span::styled(chars[at..a].iter().collect::<String>(), Style::new().bg(bg)));
+                spans.push(Span::styled(chars[a..b].iter().collect::<String>(), Style::new().bg(bg).add_modifier(Modifier::REVERSED)));
+                at = b;
+            }
+            spans.push(Span::styled(chars[at..].iter().collect::<String>(), Style::new().bg(bg)));
+            let used: usize = spans.iter().map(|s| text::width(&s.content)).sum();
+            spans.push(Span::styled(" ".repeat(end_col.saturating_sub(used)), Style::new().bg(bg)));
+            Line::from(spans)
+        }
+    }
+}
+
+/// The list for a browser (webtab.rs), which scrolls it itself, in `area` (the list's, from its first column): every
+/// row drawn and every photo by its row, from the file that's here and never asked for. The rows are drawn again
+/// only when what they show may have changed (the list worked out again, the selection, someone typing or online,
+/// the moods, the tabs); the rows in view as the frame ends up with them are added once it's drawn (ui.rs).
+fn web_panel(app: &mut App, area: Rect, width: usize, end_col: usize) -> WebPanel {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    (app.list_gen, app.slots.len(), app.list_sel, app.picker_chosen(), area.width, app.caps.no_images).hash(&mut h);
+    let mut typing: Vec<&String> = app.typing.iter().filter(|(_, w)| !w.is_empty()).map(|(j, _)| j).collect();
+    typing.sort();
+    typing.hash(&mut h);
+    if !typing.is_empty() {
+        App::typing_emoji().hash(&mut h);
+    }
+    let mut online: Vec<&String> = app.online.iter().collect();
+    online.sort();
+    online.hash(&mut h);
+    let mut moods: Vec<(&String, &String)> = app.moods.iter().collect();
+    moods.sort();
+    moods.hash(&mut h);
+    (&app.tabs, app.business.len()).hash(&mut h);
+    let layout = h.finish();
+    let photo_of = |app: &App, i: usize| match app.slots[i] {
+        Slot::Top(c) | Slot::Bottom(c) if !app.caps.no_images => app.store.avatar(&app.filtered[c].jid),
+        _ => None,
+    };
+    let rows = match app.list_panel.as_ref().filter(|(l, _)| *l == layout) {
+        Some((_, rows)) => rows.clone(),
+        None => {
+            let r = Rect::new(0, 0, area.width, 1);
+            let drawn: Vec<Buffer> = (0..app.slots.len())
+                .map(|i| {
+                    let mut buf = Buffer::empty(r);
+                    let line = slot_line(app, i, photo_of(app, i).is_some(), width, end_col);
+                    Paragraph::new(line).render(Rect { x: 1, width: area.width.saturating_sub(1), ..r }, &mut buf);
+                    buf
+                })
+                .collect();
+            let drawn = Arc::new(drawn);
+            app.list_panel = Some((layout, drawn.clone()));
+            drawn
+        }
+    };
+    let pics = (0..app.slots.len())
+        .filter(|i| matches!(app.slots[*i], Slot::Top(_)))
+        .filter_map(|i| {
+            let Slot::Top(c) = app.slots[i] else { return None };
+            let file = photo_of(app, i)?;
+            Some((i, WebPic::Image { key: format!("avatar:{}", app.filtered[c].jid), file: Some(file), png: None, x: 1, y: 0, w: 4, h: 2, from: 0.0, to: 1.0 }))
+        })
+        .collect();
+    WebPanel { key: "list".into(), area, layout, rows, view: vec![], top: app.list_top, scroll: app.scroll_gen, pics }
 }
 
 /// The selectable row a continuation row belongs to.

@@ -11,14 +11,15 @@ use std::sync::Arc;
 
 use image::DynamicImage;
 use ratatui::Frame;
+use ratatui::buffer::Buffer;
 use ratatui::layout::{Rect, Size};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::Paragraph;
+use ratatui::widgets::{Paragraph, Widget};
 use ratatui_image::picker::ProtocolType;
 use ratatui_image::{Image, Resize};
 
-use crate::app::{App, Hit, QUICK};
+use crate::app::{App, Hit, QUICK, WebPanel, WebPic};
 use crate::bigtext::big_text;
 use crate::i18n::{s, t};
 use crate::llm::Fix;
@@ -647,6 +648,7 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
         app.rows = layout(app, body.width, cell);
         app.rows_width = body.width;
         app.rows_dirty = false;
+        app.layout_gen += 1;
         let loading = app.older_pending.contains_key(&jid);
         let height = body.height as usize;
         let max_top = app.rows.len().saturating_sub(height);
@@ -681,6 +683,12 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
     let max_top = total.saturating_sub(height);
     app.top = app.top.min(max_top);
     app.at_bottom = app.top >= max_top;
+    // A browser scrolls the chat itself: moved from here, it's told to follow.
+    let web = app.web.is_some();
+    if web && app.page_top != Some(app.top) {
+        app.scroll_gen += 1;
+        app.page_top = Some(app.top);
+    }
     let start = app.top;
     let end = (start + height).min(total);
     // Few messages start at the top of the panel, as in wassup.
@@ -698,50 +706,37 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
     let rows: Vec<Row> = app.rows[start..end].to_vec();
     for (k, row) in rows.iter().enumerate() {
         let y = body.y + pad + k as u16;
-        let mut rect = Rect { y, height: 1, ..body };
+        let full = Rect { y, height: 1, ..body };
+        let mut rect = full;
         if let (Some((m, dx)), Some(rm)) = (dragged, row.msg)
             && m == rm && dx > 0 {
                 rect = Rect { x: rect.x + dx, width: rect.width.saturating_sub(dx), ..rect };
             }
-        if selected.is_some() && row.msg == selected {
-            f.render_widget(Paragraph::new("").style(Style::new().bg(theme().selected)), Rect { y, height: 1, ..body });
-        }
         if let (Some(m), Some(x)) = (row.msg, row.icon)
             && Some(m) == quick.or(pointed) {
                 let shift = dragged.filter(|(d, _)| *d == m).map(|(_, dx)| dx).unwrap_or(0);
                 icon = Some((m, x + shift, y));
             }
+        paint_row(f.buffer_mut(), row, rect, full, selected.is_some() && row.msg == selected);
         match &row.kind {
-            RowKind::Line(line) => f.render_widget(Paragraph::new(line.clone()), rect),
-            RowKind::Image { x, cols, rows, index, after, preview } => {
-                if let Some(l) = &row.under {
-                    f.render_widget(Paragraph::new(l.clone()), rect);
-                }
-                if let Some((ax, t)) = &row.aside {
-                    let r = Rect { x: body.x + ax, y, width: body.width.saturating_sub(*ax), height: 1 };
-                    f.render_widget(Paragraph::new(Span::styled(t.clone(), Style::new().fg(theme().dim).add_modifier(Modifier::ITALIC))), r);
-                }
-                if let Some((ax, t)) = after {
-                    let r = Rect { x: body.x + ax, y, width: body.width.saturating_sub(*ax), height: 1 };
-                    f.render_widget(Paragraph::new(Span::styled(t.clone(), Style::new().fg(theme().faint))), r);
-                }
+            RowKind::Line(_) => {}
+            RowKind::Image { x, cols, rows, index, preview, .. } => {
                 let msg = row.msg.unwrap_or(0);
                 match pictures.last_mut() {
                     Some(p) if p.0 == msg && p.7 == *preview => p.5 += 1,
                     _ => pictures.push((msg, *x, y, *cols, *rows, 1, *index, *preview)),
                 }
             }
-            RowKind::Emoji { x, index, after } => {
-                if let Some((ax, t)) = after {
-                    let r = Rect { x: body.x + ax, y, width: body.width.saturating_sub(*ax), height: 1 };
-                    f.render_widget(Paragraph::new(Span::styled(t.clone(), Style::new().fg(theme().faint))), r);
-                }
+            RowKind::Emoji { x, index, .. } => {
                 if *index == 0 && k + 1 < end - start {
                     emojis.push((row.msg.unwrap_or(0), *x, y));
                 }
             }
         }
     }
+    // A browser has every picture of the chat from the panel (web_panel): those in view are drawn as in a terminal,
+    // for what that asks for (the file, the decoding), but not passed on twice.
+    let pics_before = app.web_pics.len();
     for (msg, x, y, cols, full_rows, vis, first, preview) in pictures {
         let rect = Rect { x: body.x + x, y, width: cols, height: vis };
         if !draw_picture(f, app, msg, rect, full_rows, first, cell, preview) {
@@ -773,6 +768,10 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
                 draw_whole(f, app, &format!("emoji:{e}"), &img, Rect { x: body.x + x + 4 * k as u16, y, width: 4, height: 2 }, cell);
             }
         }
+    }
+    if web {
+        app.web_pics.truncate(pics_before);
+        app.web_panel = Some(web_panel(app, &jid, body));
     }
     if let Some((m, x, y)) = icon
         && app.viewing.is_none() && !app.showing_qr {
@@ -820,6 +819,121 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
             _ => {}
         }
     }
+}
+
+/// One of the chat's rows into `buf`: its line at `rect` (moved right while it's dragged), or what goes around a
+/// picture or emoji on their own (the bubble's row under a preview, the description beside it, the time after it);
+/// on the selection's grey across `full`, the row's whole width, when its message is the one selected.
+fn paint_row(buf: &mut Buffer, row: &Row, rect: Rect, full: Rect, selected: bool) {
+    if selected {
+        Paragraph::new("").style(Style::new().bg(theme().selected)).render(full, buf);
+    }
+    let beside = |buf: &mut Buffer, ax: u16, t: &str, style: Style| {
+        let r = Rect { x: full.x + ax, width: full.width.saturating_sub(ax), ..full };
+        Paragraph::new(Span::styled(t.to_string(), style)).render(r, buf);
+    };
+    match &row.kind {
+        RowKind::Line(line) => Paragraph::new(line.clone()).render(rect, buf),
+        RowKind::Image { after, .. } => {
+            if let Some(l) = &row.under {
+                Paragraph::new(l.clone()).render(rect, buf);
+            }
+            if let Some((ax, t)) = &row.aside {
+                beside(buf, *ax, t, Style::new().fg(theme().dim).add_modifier(Modifier::ITALIC));
+            }
+            if let Some((ax, t)) = after {
+                beside(buf, *ax, t, Style::new().fg(theme().faint));
+            }
+        }
+        RowKind::Emoji { after, .. } => {
+            if let Some((ax, t)) = after {
+                beside(buf, *ax, t, Style::new().fg(theme().faint));
+            }
+        }
+    }
+}
+
+/// The chat for a browser (webtab.rs), which scrolls it itself: every row drawn plain, again only once they're laid
+/// out again, and every picture by its first row, from what's here already (the file downloaded, or the thumbnail
+/// the message came with) and never asked for: those in view are, by the frame, as in a terminal. The rows in view
+/// as the frame ends up with them are added once it's drawn (ui.rs).
+fn web_panel(app: &mut App, jid: &str, body: Rect) -> WebPanel {
+    let w = body.width;
+    let kept = app.panel_rows.as_ref().filter(|(g, pw, _)| *g == app.layout_gen && *pw == w).map(|(_, _, r)| r.clone());
+    let rows = match kept {
+        Some(r) => r,
+        None => {
+            let selected = app.selected.as_deref().and_then(|id| app.msgs.iter().position(|m| m.id == id));
+            let r = Rect::new(0, 0, w, 1);
+            let drawn: Vec<Buffer> = app
+                .rows
+                .iter()
+                .map(|row| {
+                    let mut buf = Buffer::empty(r);
+                    paint_row(&mut buf, row, r, r, selected.is_some() && row.msg == selected);
+                    buf
+                })
+                .collect();
+            let drawn = Arc::new(drawn);
+            app.panel_rows = Some((app.layout_gen, w, drawn.clone()));
+            drawn
+        }
+    };
+    let mut pics = vec![];
+    for k in 0..app.rows.len() {
+        let msg = app.rows[k].msg.unwrap_or(0);
+        match app.rows[k].kind.clone() {
+            RowKind::Image { x, cols, rows: tall, index: 0, preview, .. } => {
+                if let Some(p) = panel_picture(app, msg, preview, x, cols, tall) {
+                    pics.push((k, p));
+                }
+            }
+            RowKind::Emoji { x, index: 0, .. } => {
+                let text = app.msgs.get(msg).map(|m| m.text.clone()).unwrap_or_default();
+                let each = unicode_segmentation::UnicodeSegmentation::graphemes(text.trim(), true).filter(|g| !g.trim().is_empty());
+                for (i, e) in each.enumerate() {
+                    pics.push((k, WebPic::Emoji { emoji: e.to_string(), x: x + 4 * i as u16, y: 0 }));
+                }
+            }
+            _ => {}
+        }
+    }
+    WebPanel { key: jid.to_string(), area: body, layout: app.layout_gen, rows, view: vec![], top: app.top, scroll: app.scroll_gen, pics }
+}
+
+/// A message's picture for the panel, whole, at column `x`: its file if it's here (a link's preview, an image or
+/// sticker downloaded), which the page asks for itself; else the picture decoded already, or the thumbnail the
+/// message came with (decoded once and kept apart). None with neither.
+fn panel_picture(app: &mut App, msg: usize, preview: bool, x: u16, cols: u16, tall: u16) -> Option<WebPic> {
+    let m = app.msgs.get(msg)?.clone();
+    let key = format!("{}{}/{}", if preview { "link:" } else { "" }, m.chat, m.id);
+    let file = if preview {
+        let p = crate::wa::preview_path(&app.media_dir(), &m.chat, &m.id);
+        p.exists().then(|| p.to_string_lossy().into_owned())
+    } else if matches!(m.kind.as_str(), "image" | "sticker") {
+        m.media_path.clone()
+    } else {
+        None
+    };
+    let png = match app.images.get(&key) {
+        Some(img) => Some(img.clone()),
+        None if preview => None,
+        None => match app.thumbs.get(&key) {
+            Some(img) => Some(img.clone()),
+            None => {
+                let img = Arc::new(image::load_from_memory(m.thumb.as_deref()?).ok()?);
+                if app.thumbs.len() > 1000 {
+                    app.thumbs.clear();
+                }
+                app.thumbs.insert(key.clone(), img.clone());
+                Some(img)
+            }
+        },
+    };
+    if file.is_none() && png.is_none() {
+        return None;
+    }
+    Some(WebPic::Image { key, file, png, x, y: 0, w: cols, h: tall, from: 0.0, to: 1.0 })
 }
 
 /// The "☺" a message under the pointer shows beside its time, grey, bold under the pointer; clicked, the quick

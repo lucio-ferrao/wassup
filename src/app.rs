@@ -75,6 +75,8 @@ pub enum Input {
     InitialFocus(bool),
     /// Herdr had no other chat's pane to go to: the list opens.
     HerdrNoNext,
+    /// In a browser, the chat or the chat list scrolled by the page itself: the row it stopped at on top.
+    Scrolled(usize),
 }
 
 /// What a click can land on, besides the list's rows and the messages.
@@ -227,6 +229,19 @@ pub struct App {
     pub keep_selected_in_view: bool,
     pub rendered_jid: Option<String>,
     pub loading_drawn: bool,
+    /// In a browser, which scrolls the chat itself (webtab.rs): the rows laid out again each time they are (their
+    /// generation), each drawn on its own for the page and kept while they last; the row the page has on top, and
+    /// how many times the view was moved from here, which the page then follows; this frame's rows for it.
+    pub layout_gen: u64,
+    pub panel_rows: Option<(u64, u16, Arc<Vec<ratatui::buffer::Buffer>>)>,
+    pub page_top: Option<usize>,
+    pub scroll_gen: u64,
+    pub web_panel: Option<WebPanel>,
+    /// The thumbnails the messages came with, decoded for the panel's pictures out of view.
+    pub thumbs: HashMap<String, Arc<DynamicImage>>,
+    /// The chat list for a browser: how many times it was worked out again, and its rows drawn, by what they show.
+    pub list_gen: u64,
+    pub list_panel: Option<(u64, Arc<Vec<ratatui::buffer::Buffer>>)>,
 
     pub input: String,
     pub cursor: usize,
@@ -399,6 +414,14 @@ impl App {
             keep_selected_in_view: false,
             rendered_jid: None,
             loading_drawn: false,
+            layout_gen: 0,
+            panel_rows: None,
+            page_top: None,
+            scroll_gen: 0,
+            web_panel: None,
+            thumbs: HashMap::new(),
+            list_gen: 0,
+            list_panel: None,
             input: String::new(),
             cursor: 0,
             accepted: None,
@@ -1802,6 +1825,29 @@ impl App {
                 }
             }
             Input::HerdrNoNext => self.open_picker("", None),
+            Input::Scrolled(top) => {
+                // The page shows it there already: the view follows, for what depends on it (the "↓", the pictures
+                // to fetch, reading it to the end), and at the top the older messages come, as with the wheel.
+                if self.picker_open {
+                    self.list_top = top.min(self.slots.len().saturating_sub(self.list_rows));
+                    self.page_top = Some(self.list_top);
+                    self.list_follow = false;
+                    return;
+                }
+                if self.current().is_none() {
+                    return;
+                }
+                let max_top = self.rows.len().saturating_sub(self.chat_area.height as usize);
+                self.top = top.min(max_top);
+                self.page_top = Some(self.top);
+                self.at_bottom = self.top >= max_top;
+                self.anchor = None;
+                self.sent_fix = None;
+                self.text_sel = None;
+                if self.top == 0 && !self.rows_dirty {
+                    self.load_older();
+                }
+            }
         }
     }
 
@@ -2919,8 +2965,25 @@ pub enum WebMsg {
     Title(String),
     /// The open chat's photo (a file under the media folder), or its initials on its colour; nothing for the list.
     Icon { photo: Option<String>, initials: Option<String>, color: Option<String> },
-    Pictures(Vec<WebPic>),
+    /// A frame's pictures, which complete it, and the chat's rows for the page to scroll itself.
+    Frame(Vec<WebPic>, Option<WebPanel>),
     Logout,
+}
+
+/// The open chat for a browser, which scrolls it itself: where it goes on the screen and how many rows are in view,
+/// every row (`rows`, drawn plain, of generation `layout`; those in view, `view`, as the frame has them, with whatever
+/// floats over them), the row on top and how many times it was moved here (`scroll`), and every picture by its first
+/// row. `key` is the chat's: another one starts afresh.
+#[derive(Clone, Debug)]
+pub struct WebPanel {
+    pub key: String,
+    pub area: Rect,
+    pub layout: u64,
+    pub rows: Arc<Vec<ratatui::buffer::Buffer>>,
+    pub view: Vec<ratatui::buffer::Buffer>,
+    pub top: usize,
+    pub scroll: u64,
+    pub pics: Vec<(usize, WebPic)>,
 }
 
 /// A picture of a frame for the page: its file (or its pixels, by key), where it goes in cells, and the part of it

@@ -2,6 +2,9 @@
 //! webtab.ts: the same App as in a terminal, drawn by ratatui to a backend of its own, whose frames go to the page
 //! (web/app.js) cell by cell with the colours resolved; the page's keys, mouse, pastes and focus come back as a
 //! terminal sends them and are read into crossterm's events. The pictures go as pictures, placed over their cells.
+//! The open chat, or the chat list, goes whole besides, every row of it and every picture, which the page scrolls
+//! itself and says where it stopped (`Input::Scrolled`); the rows in view as the frame has them, with whatever floats
+//! over them.
 //!
 //! Both ways it's one message per line: the page's from the server on stdin (the size, the keys and the mouse as a
 //! terminal would send them, and the acknowledgement of each frame), the tab's to the server on descriptor 3. A frame
@@ -30,7 +33,7 @@ use serde_json::{Map, Value, json};
 use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 use unicode_width::UnicodeWidthStr;
 
-use crate::app::{App, Input, WebMsg, WebPic};
+use crate::app::{App, Input, WebMsg, WebPanel, WebPic};
 use crate::store::Store;
 
 /// The page's colours, which it draws the cells that have none of their own in.
@@ -156,6 +159,8 @@ struct FromPage {
     d: Option<String>,
     cols: Option<u16>,
     rows: Option<u16>,
+    top: Option<usize>,
+    id: Option<u64>,
 }
 
 /// What goes to the server: a line, or the end of them.
@@ -181,6 +186,14 @@ fn read_page(lines: std::io::Lines<BufReader<std::io::Stdin>>, screen: Arc<Mutex
     for line in lines {
         let Ok(line) = line else { break };
         let Ok(m) = serde_json::from_str::<FromPage>(&line) else { continue };
+        // Where the page scrolled the chat or the list to: only for the one it has now (a list's left behind by a
+        // chat opened meanwhile isn't the chat's).
+        if let ("scroll", Some(top)) = (m.t.as_str(), m.top) {
+            if screen.lock().unwrap().panel.as_ref().map(|p| p.id) == m.id {
+                let _ = tx.send(Input::Scrolled(top));
+            }
+            continue;
+        }
         match (m.t.as_str(), m.d, m.cols, m.rows) {
             ("in", Some(d), ..) => {
                 for ev in events(&d) {
@@ -192,6 +205,7 @@ fn read_page(lines: std::io::Lines<BufReader<std::io::Stdin>>, screen: Arc<Mutex
                 let _ = tx.send(Input::Term(Event::Resize(cols, rows)));
             }
             ("ack", ..) => screen.lock().unwrap().acked(),
+            ("again", ..) => screen.lock().unwrap().again(),
             _ => {}
         }
     }
@@ -201,8 +215,9 @@ fn read_page(lines: std::io::Lines<BufReader<std::io::Stdin>>, screen: Arc<Mutex
 /// Passes on what the App tells the page besides its cells: the pictures of the frame just drawn (which complete
 /// it), a link to open, text to copy, an attachment to open, the title, the icon (when it changes), leaving.
 fn tell(screen: &Mutex<Screen>, out: &mpsc::Sender<Out>, icon_shown: &mut String, m: WebMsg) {
+    let (title, icon) = (matches!(m, WebMsg::Title(_)), matches!(m, WebMsg::Icon { .. }));
     let line = match m {
-        WebMsg::Pictures(pics) => return screen.lock().unwrap().framed(pics),
+        WebMsg::Frame(pics, panel) => return screen.lock().unwrap().framed(pics, panel),
         WebMsg::Link(url) => json!({ "t": "link", "url": url }),
         WebMsg::Copy(text) => json!({ "t": "copy", "text": text }),
         WebMsg::Open(file) => json!({ "t": "open", "file": file }),
@@ -228,7 +243,14 @@ fn tell(screen: &Mutex<Screen>, out: &mpsc::Sender<Out>, icon_shown: &mut String
         }
         WebMsg::Logout => json!({ "t": "logout" }),
     };
-    let _ = out.send(Out::Line(line.to_string()));
+    let line = line.to_string();
+    // The title and the icon, kept for a page come back (Screen::again).
+    if title {
+        screen.lock().unwrap().title = Some(line.clone());
+    } else if icon {
+        screen.lock().unwrap().icon = Some(line.clone());
+    }
+    let _ = out.send(Out::Line(line));
 }
 
 /// A file's path under the media folder, as the server serves it; none for a file elsewhere.
@@ -336,8 +358,12 @@ struct Screen {
     cursor: Position,
     /// The frames drawn, each waiting for its pictures, which the App tells after drawing it.
     drawn: VecDeque<Buffer>,
-    /// The last frame complete and not sent yet.
-    ready: Option<(Buffer, Vec<WebPic>)>,
+    /// The last frame complete and not sent yet, with its chat for the page to scroll; the last one sent, and the
+    /// title and icon told, for a page come back.
+    ready: Option<(Buffer, Vec<WebPic>, Option<WebPanel>)>,
+    last: Option<(Buffer, Vec<WebPic>, Option<WebPanel>)>,
+    title: Option<String>,
+    icon: Option<String>,
     /// A frame was sent and the page hasn't said it drew it.
     waiting: bool,
     sent_size: Option<(u16, u16)>,
@@ -347,8 +373,25 @@ struct Screen {
     styles: HashMap<(Option<Rgb>, Option<Rgb>, u8), usize>,
     /// The pictures told to the page, by id: a media file, or a picture's pixels by its key and size.
     pics: HashMap<String, usize>,
+    /// The chat or list the page scrolls, as it was sent: which (and its number for the page), where, its rows'
+    /// generation and each row (as cells and as sent), the rows that were in view, how many times it was moved, its
+    /// pictures. None while there's none.
+    panel: Option<SentPanel>,
+    panels: u64,
     media: PathBuf,
     out: mpsc::Sender<Out>,
+}
+
+struct SentPanel {
+    id: u64,
+    key: String,
+    area: Rect,
+    layout: u64,
+    rows: Vec<String>,
+    cells: Vec<Option<Buffer>>,
+    view: std::ops::Range<usize>,
+    scroll: u64,
+    pics: String,
 }
 
 impl Screen {
@@ -359,21 +402,26 @@ impl Screen {
             cursor: Position::ORIGIN,
             drawn: VecDeque::new(),
             ready: None,
+            last: None,
+            title: None,
+            icon: None,
             waiting: false,
             sent_size: None,
             sent_rows: vec![],
             sent_pics: String::new(),
             styles: HashMap::new(),
             pics: HashMap::new(),
+            panel: None,
+            panels: 0,
             media,
             out,
         }
     }
 
     /// A frame's pictures: it's complete, and goes now, or once the page has drawn the one before.
-    fn framed(&mut self, pics: Vec<WebPic>) {
+    fn framed(&mut self, pics: Vec<WebPic>, panel: Option<WebPanel>) {
         let cells = self.drawn.pop_front().unwrap_or_else(|| self.cells.clone());
-        self.ready = Some((cells, pics));
+        self.ready = Some((cells, pics, panel));
         if !self.waiting {
             self.send_ready();
         }
@@ -385,11 +433,42 @@ impl Screen {
         self.send_ready();
     }
 
+    /// Another page has this tab now (the same, come back on a new connection, web.rs): it has nothing, so after a
+    /// line that says so, for the server to drop what was said before it, everything goes again: the title, the
+    /// icon, and the last frame whole, its styles and pictures with it.
+    fn again(&mut self) {
+        self.sent_size = None;
+        self.sent_rows.clear();
+        self.sent_pics.clear();
+        self.styles.clear();
+        self.pics.clear();
+        self.panel = None;
+        self.waiting = false;
+        let _ = self.out.send(Out::Line(crate::web::AGAIN.to_string()));
+        for line in [self.title.clone(), self.icon.clone()].into_iter().flatten() {
+            let _ = self.out.send(Out::Line(line));
+        }
+        if self.ready.is_none() {
+            self.ready = self.last.clone();
+        }
+        self.send_ready();
+    }
+
     /// The frame ready, as what changed since the last one sent: the size when it changed, the rows that did, the
     /// styles not told before, the pictures when they moved and those not told before. Nothing when nothing did.
     fn send_ready(&mut self) {
-        let Some((buf, pics)) = self.ready.take() else { return };
+        let Some((mut buf, pics, panel)) = self.ready.take() else { return };
+        self.last = Some((buf.clone(), pics.clone(), panel.clone()));
         let (cols, rows) = (buf.area.width, buf.area.height);
+        // Under the chat the page scrolls, the grid's cells are left blank: they'd go again at every step.
+        if let Some(p) = &panel {
+            let under = p.area.intersection(buf.area);
+            for y in under.top()..under.bottom() {
+                for x in under.left()..under.right() {
+                    buf[(x, y)].reset();
+                }
+            }
+        }
         let mut m = Map::new();
         m.insert("t".into(), json!("frame"));
         if self.sent_size != Some((cols, rows)) {
@@ -409,26 +488,116 @@ impl Screen {
             self.sent_rows[y as usize] = key;
             lines.push(json!([y, runs]));
         }
-        if !styles.is_empty() {
-            m.insert("styles".into(), Value::Object(styles));
-        }
         if !lines.is_empty() {
             m.insert("lines".into(), Value::Array(lines));
         }
-        let (shown, defs) = self.pictures(&pics);
+        let (shown, mut defs) = self.pictures(pics.iter().map(|p| (p, None)));
         let key = shown.to_string();
         if key != self.sent_pics {
             self.sent_pics = key;
             m.insert("pics".into(), shown);
-            if !defs.is_empty() {
-                m.insert("defs".into(), Value::Object(defs));
-            }
+        }
+        if let Some(p) = self.panel_changes(panel, &mut styles, &mut defs) {
+            m.insert("panel".into(), p);
+        }
+        if !styles.is_empty() {
+            m.insert("styles".into(), Value::Object(styles));
+        }
+        if !defs.is_empty() {
+            m.insert("defs".into(), Value::Object(defs));
         }
         if m.len() == 1 {
             return;
         }
         self.waiting = true;
         let _ = self.out.send(Out::Line(Value::Object(m).to_string()));
+    }
+
+    /// What changed in the chat or list the page scrolls since it was last sent: null once there's none; else, against
+    /// what was sent, where it goes (`x`, `y`, `w`, `h`, with `reset` and its number, `id`, for another one), how many
+    /// rows it has, the rows that changed (looked at all when they were drawn again, else those in view now or
+    /// before), its pictures when they changed, and the row on top when it was moved here (`top`, `scroll`). None
+    /// when nothing did.
+    fn panel_changes(&mut self, panel: Option<WebPanel>, styles: &mut Map<String, Value>, defs: &mut Map<String, Value>) -> Option<Value> {
+        let Some(p) = panel else {
+            return self.panel.take().map(|_| Value::Null);
+        };
+        let mut m = Map::new();
+        let fresh = self.panel.as_ref().is_none_or(|s| s.key != p.key || s.area.width != p.area.width);
+        if fresh {
+            self.panels += 1;
+            m.insert("reset".into(), json!(true));
+            m.insert("id".into(), json!(self.panels));
+            self.panel = Some(SentPanel {
+                id: self.panels,
+                key: p.key.clone(),
+                area: Rect::default(),
+                layout: u64::MAX,
+                rows: vec![],
+                cells: vec![],
+                view: 0..0,
+                scroll: u64::MAX,
+                pics: String::new(),
+            });
+        }
+        let total = p.rows.len();
+        let view = p.top..(p.top + p.view.len()).min(total);
+        let sent = self.panel.take().expect("set above");
+        let mut sent = sent;
+        if sent.area != p.area {
+            sent.area = p.area;
+            m.insert("x".into(), json!(p.area.x));
+            m.insert("y".into(), json!(p.area.y));
+            m.insert("w".into(), json!(p.area.width));
+            m.insert("h".into(), json!(p.area.height));
+        }
+        if sent.rows.len() != total {
+            sent.rows.resize(total, String::new());
+            sent.cells.resize(total, None);
+            m.insert("rows".into(), json!(total));
+        }
+        let look: Vec<usize> = if sent.layout != p.layout {
+            (0..total).collect()
+        } else {
+            let mut v: Vec<usize> = sent.view.clone().chain(view.clone()).filter(|r| *r < total).collect();
+            v.sort_unstable();
+            v.dedup();
+            v
+        };
+        let mut lines = vec![];
+        for r in look {
+            let row = if view.contains(&r) { &p.view[r - p.top] } else { &p.rows[r] };
+            // The same cells as sent: nothing to work out.
+            if sent.cells[r].as_ref() == Some(row) {
+                continue;
+            }
+            sent.cells[r] = Some(row.clone());
+            let runs = Value::Array(self.row(row, 0, styles));
+            let key = runs.to_string();
+            if sent.rows[r] != key {
+                sent.rows[r] = key;
+                lines.push(json!([r, runs]));
+            }
+        }
+        if !lines.is_empty() {
+            m.insert("lines".into(), Value::Array(lines));
+        }
+        sent.layout = p.layout;
+        sent.view = view;
+        let (shown, more) = self.pictures(p.pics.iter().map(|(r, pic)| (pic, Some(*r))));
+        defs.extend(more);
+        let key = shown.to_string();
+        if key != sent.pics {
+            sent.pics = key;
+            m.insert("pics".into(), shown);
+        }
+        if sent.scroll != p.scroll {
+            sent.scroll = p.scroll;
+            m.insert("top".into(), json!(p.top));
+            m.insert("scroll".into(), json!(p.scroll));
+        }
+        self.panel = Some(sent);
+        (!m.is_empty()).then_some(Value::Object(m))
     }
 
     /// A row as the page draws it: runs of cells in one style, as [cells, text, style] one after the other. A wide
@@ -489,11 +658,12 @@ impl Screen {
     }
 
     /// The pictures where they go, in cells, with the part of each in view; each told to the page once in `defs`,
-    /// by its file under the media folder, which the page asks the server for, or else by its pixels.
-    fn pictures(&mut self, pics: &[WebPic]) -> (Value, Map<String, Value>) {
+    /// by its file under the media folder, which the page asks the server for, or else by its pixels. Those of the
+    /// chat the page scrolls come with their row, for their `y`.
+    fn pictures<'a>(&mut self, pics: impl Iterator<Item = (&'a WebPic, Option<usize>)>) -> (Value, Map<String, Value>) {
         let mut shown = vec![];
         let mut defs = Map::new();
-        for p in pics {
+        for (p, row) in pics {
             match p {
                 WebPic::Image { key, file, png, x, y, w, h, from, to } => {
                     let servable = file.as_deref().and_then(|f| in_media(&self.media, f)).filter(|f| is_picture(f));
@@ -521,9 +691,9 @@ impl Screen {
                     };
                     // The rows in view: `h` is the whole picture's.
                     let rows = ((to - from) * *h as f32).round().max(1.0) as u16;
-                    shown.push(json!({ "id": id, "x": x, "y": y, "w": w, "h": rows, "from": from, "to": to }));
+                    shown.push(json!({ "id": id, "x": x, "y": row.unwrap_or(*y as usize), "w": w, "h": rows, "from": from, "to": to }));
                 }
-                WebPic::Emoji { emoji, x, y } => shown.push(json!({ "emoji": emoji, "x": x, "y": y })),
+                WebPic::Emoji { emoji, x, y } => shown.push(json!({ "emoji": emoji, "x": x, "y": row.unwrap_or(*y as usize) })),
             }
         }
         (Value::Array(shown), defs)
@@ -848,7 +1018,7 @@ mod tests {
         s.cells.set_string(0, 0, "ab界c→", Style::new().fg(Color::Indexed(81)));
         s.cells.set_string(0, 1, "x", Style::new().add_modifier(Modifier::REVERSED | Modifier::CROSSED_OUT));
         s.drawn.push_back(s.cells.clone());
-        s.framed(vec![]);
+        s.framed(vec![], None);
         let f = line(&rx).unwrap();
         assert_eq!(f["cols"], 8);
         // "ab" in one run, "界" in its two cells, "c", "→" in a cell of its own, then the blanks.
@@ -858,7 +1028,7 @@ mod tests {
         // Not drawn yet: the next waits, and only what changed goes.
         s.cells.set_string(7, 1, "z", Style::new());
         s.drawn.push_back(s.cells.clone());
-        s.framed(vec![]);
+        s.framed(vec![], None);
         assert!(line(&rx).is_none());
         s.acked();
         let f = line(&rx).unwrap();
@@ -868,7 +1038,7 @@ mod tests {
         // Nothing changed, nothing sent, and nothing to wait for.
         s.acked();
         s.drawn.push_back(s.cells.clone());
-        s.framed(vec![]);
+        s.framed(vec![], None);
         assert!(line(&rx).is_none());
         assert!(!s.waiting);
     }
@@ -879,7 +1049,7 @@ mod tests {
         let img = Arc::new(DynamicImage::new_rgb8(4, 2));
         let pic = |key: &str, file: Option<&str>| WebPic::Image { key: key.into(), file: file.map(String::from), png: Some(img.clone()), x: 1, y: 0, w: 4, h: 4, from: 0.25, to: 0.75 };
         s.drawn.push_back(s.cells.clone());
-        s.framed(vec![pic("c/1", Some("/srv/wa/media/c/foto.jpg")), pic("c/2", None), pic("c/3", Some("/srv/wa/media/c/video.mp4"))]);
+        s.framed(vec![pic("c/1", Some("/srv/wa/media/c/foto.jpg")), pic("c/2", None), pic("c/3", Some("/srv/wa/media/c/video.mp4"))], None);
         let f = line(&rx).unwrap();
         assert_eq!(f["defs"]["1"], json!({ "file": "c/foto.jpg" }));
         assert!(f["defs"]["2"]["png"].as_str().is_some_and(|p| p.starts_with("iVBOR")));
@@ -888,10 +1058,65 @@ mod tests {
         // The same pictures again: already told.
         s.acked();
         s.drawn.push_back(s.cells.clone());
-        s.framed(vec![pic("c/1", Some("/srv/wa/media/c/foto.jpg"))]);
+        s.framed(vec![pic("c/1", Some("/srv/wa/media/c/foto.jpg"))], None);
         let f = line(&rx).unwrap();
         assert!(f.get("defs").is_none());
         assert_eq!(f["pics"].as_array().unwrap().len(), 1);
+    }
+
+    /// The chat the page scrolls: the grid blank under it; every row the first time, those in view as the frame has
+    /// them; then only the rows that change, those that leave the view going back to plain; the row on top only when
+    /// it was moved here; null once there's no chat.
+    #[test]
+    fn chat_panel_scrolled_by_the_page() {
+        let (mut s, rx) = screen();
+        s.size = Size::new(8, 4);
+        s.cells = Buffer::empty(Rect::new(0, 0, 8, 4));
+        s.cells.set_string(0, 1, "abcdefgh", Style::new());
+        let one = |t: &str| {
+            let mut b = Buffer::empty(Rect::new(0, 0, 6, 1));
+            b.set_string(0, 0, t, Style::new());
+            b
+        };
+        let rows = Arc::new(vec![one("r0"), one("r1"), one("r2"), one("r3")]);
+        let panel = |top: usize, view: Vec<Buffer>, scroll: u64| WebPanel {
+            key: "c".into(),
+            area: Rect::new(1, 1, 6, 2),
+            layout: 1,
+            rows: rows.clone(),
+            view,
+            top,
+            scroll,
+            pics: vec![(3, WebPic::Emoji { emoji: "😀".into(), x: 2, y: 0 })],
+        };
+        let text = |f: &Value, k: usize| f["panel"]["lines"][k][1][1].as_str().unwrap().trim().to_string();
+
+        s.drawn.push_back(s.cells.clone());
+        s.framed(vec![], Some(panel(2, vec![one("V2"), one("V3")], 1)));
+        let f = line(&rx).unwrap();
+        assert_eq!(f["lines"][1], json!([1, [8, "a      h", 0]]));
+        let p = &f["panel"];
+        assert_eq!((p["reset"].clone(), p["x"].clone(), p["y"].clone(), p["w"].clone(), p["h"].clone(), p["rows"].clone()), (json!(true), json!(1), json!(1), json!(6), json!(2), json!(4)));
+        assert_eq!((0..4).map(|k| text(&f, k)).collect::<Vec<_>>(), ["r0", "r1", "V2", "V3"]);
+        assert_eq!((p["top"].clone(), p["scroll"].clone()), (json!(2), json!(1)));
+        assert_eq!(p["pics"], json!([{ "emoji": "😀", "x": 2, "y": 3 }]));
+
+        // Scrolled to the top by the page: the rows that left the view go back to plain, and nothing moves it.
+        s.acked();
+        s.drawn.push_back(s.cells.clone());
+        s.framed(vec![], Some(panel(0, vec![one("r0"), one("r1")], 1)));
+        let f = line(&rx).unwrap();
+        assert!(f.get("lines").is_none());
+        let p = &f["panel"];
+        assert_eq!(p["lines"].as_array().unwrap().iter().map(|l| l[0].as_u64().unwrap()).collect::<Vec<_>>(), [2, 3]);
+        assert_eq!(text(&f, 0), "r2");
+        assert!(p.get("top").is_none() && p.get("reset").is_none() && p.get("pics").is_none());
+
+        // No chat drawn: none for the page.
+        s.acked();
+        s.drawn.push_back(s.cells.clone());
+        s.framed(vec![], None);
+        assert_eq!(line(&rx).unwrap()["panel"], Value::Null);
     }
 
     #[test]

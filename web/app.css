@@ -34,13 +34,13 @@ body {
 
 /* The cells: each row a line of runs, each run as wide as its cells (app.js), whatever the font gives its characters. */
 #screen { position: relative; }
-#grid > div {
+#grid > div, #panel-grid > div {
   display: flex;
   height: var(--ch);
   line-height: var(--ch);
   white-space: pre;
 }
-#grid span {
+#grid span, #panel-grid span {
   flex: none;
   width: calc(var(--n, 1) * var(--cw));
   height: var(--ch);
@@ -48,16 +48,32 @@ body {
   text-align: center;
 }
 /* The box-drawing and block characters (app.js), in the text's colour. */
-#grid svg { display: block; width: 100%; height: 100%; overflow: visible; }
-#grid path { fill: none; stroke: currentColor; stroke-width: 1.2px; vector-effect: non-scaling-stroke; }
-#grid .b path { stroke-width: 2px; }
-#grid path.x { stroke-width: 2.2px; }
-#grid rect { fill: currentColor; shape-rendering: crispEdges; }
-/* The pictures, over the blank cells wassup leaves them. */
+#grid svg, #panel-grid svg { display: block; width: 100%; height: 100%; overflow: visible; }
+#grid path, #panel-grid path { fill: none; stroke: currentColor; stroke-width: 1.2px; vector-effect: non-scaling-stroke; }
+#grid .b path, #panel-grid .b path { stroke-width: 2px; }
+#grid path.x, #panel-grid path.x { stroke-width: 2.2px; }
+#grid rect, #panel-grid rect { fill: currentColor; shape-rendering: crispEdges; }
+/* The open chat, which the page scrolls itself (app.js): over the grid's cells it covers, a drag or the wheel
+   scrolling it as the browser does, its rows snapping into place, no bar (the cells are counted), and its end
+   never pulling the page (a phone would reload it). */
+#panel {
+  position: absolute;
+  overflow-x: hidden;
+  overflow-y: auto;
+  background: var(--bg);
+  scroll-snap-type: y mandatory;
+  overscroll-behavior: contain;
+  touch-action: pan-y;
+  scrollbar-width: none;
+}
+#panel::-webkit-scrollbar { display: none; }
+#panel-grid > div { scroll-snap-align: start; }
+/* The pictures, over the blank cells wassup leaves them: the screen's, and the chat's, which scroll with it. */
 #pics { position: absolute; inset: 0; pointer-events: none; }
-#pics > div { position: absolute; overflow: hidden; }
-#pics img { position: absolute; left: 0; }
-#pics .emoji {
+#panel-pics { position: absolute; left: 0; top: 0; width: 100%; pointer-events: none; }
+#pics > div, #panel-pics > div { position: absolute; overflow: hidden; }
+#pics img, #panel-pics img { position: absolute; left: 0; }
+#pics .emoji, #panel-pics .emoji {
   display: flex;
   align-items: center;
   justify-content: center;
@@ -88,6 +104,31 @@ body {
 #door h1 { font-weight: 600; letter-spacing: 0.05em; }
 #door p { color: var(--dim); line-height: 1.4; }
 #door-error { color: #f15c6d; min-height: 1.4em; }
+/* The way in by a code: a quieter button under the passkey's, then the field for the six digits beside its own. */
+#door-code {
+  display: block;
+  margin: 0.8rem auto 0;
+  background: transparent;
+  border: 1px solid var(--green);
+}
+#door-form {
+  display: flex;
+  gap: 0.5rem;
+  justify-content: center;
+  margin-top: 1rem;
+}
+#door-input {
+  width: 7ch;
+  padding: 0.4rem;
+  font: inherit;
+  font-size: 1.4rem;
+  letter-spacing: 0.15em;
+  text-align: center;
+  color: var(--fg);
+  background: transparent;
+  border: 1px solid var(--dim);
+  border-radius: 0.5rem;
+}
 button {
   font: inherit;
   color: var(--fg);
@@ -96,6 +137,22 @@ button {
   border-radius: 0.5rem;
   padding: 0.7rem 1.2rem;
   cursor: pointer;
+}
+
+/* What the connection is doing while it comes back: a line at the top, over the screen as it was. */
+#status {
+  position: fixed;
+  top: 0.4rem;
+  left: 50%;
+  transform: translateX(-50%);
+  margin: 0;
+  padding: 0.3rem 0.8rem;
+  border-radius: 0.5rem;
+  background: rgba(0, 0, 0, 0.7);
+  color: var(--dim);
+  font-size: 0.9rem;
+  pointer-events: none;
+  z-index: 10;
 }
 
 /* The menu, in a corner, faint until the pointer is on it. */

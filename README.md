@@ -162,14 +162,19 @@ it, or under it when there's no room.
 
 ### On the web
 
-`wa --web` serves wassup to a browser: each tab runs wa itself, on this machine, which sends the page its screen cell by
-cell, the colours resolved, and the page draws it in HTML, so the screen is the terminal's; pictures go as pictures,
-over their cells, and a frame goes once the page has drawn the one before, so a slow link skips frames rather than
-falling behind. Keys, clicks, the wheel and a finger's drag go back as a terminal would send them; with Shift held, the
-mouse selects text the browser's way. The process keeps the WhatsApp connection, as the server or a client of one, with
-no tab open too. Without a certificate it listens on `localhost` only, over HTTP (`http://localhost:8799`, `--port` to
-change it); with one, Let's Encrypt's as certbot makes it, over HTTPS on every interface, under the certificate's name,
-which it then answers to alone, and it reads the files again when certbot renews them:
+`wa --web` serves wassup to a browser: each tab runs wa itself, on this machine, which sends the page its screen cell
+by cell, the colours resolved, and the page draws it in HTML, so the screen is the terminal's; pictures go as
+pictures, over their cells, and a frame goes once the page has drawn the one before, so a slow link skips frames
+rather than falling behind. The open chat and the chat list go whole, every row and picture of them, and the browser
+scrolls them itself, with the wheel or a finger's drag, telling wa only where it stopped (for the older messages at
+the top, the pictures in view and the `↓`); keys, clicks, and the wheel elsewhere go back as a terminal would send
+them; with Shift held, the mouse selects text the browser's way. When the connection drops (the phone puts the page
+away, the network goes), the page comes back by itself once it's in view, to the same tab, which waits for it 15
+minutes: the open chat, the text being written and the place in it as they were. The process keeps the WhatsApp
+connection, as the server or a client of one, with no tab open too. Without a certificate it listens on `localhost`
+only, over HTTP (`http://localhost:8799`, `--port` to change it); with one, Let's Encrypt's as certbot makes it, over
+HTTPS on every interface, under the certificate's name, which it then answers to alone, and it reads the files again
+when certbot renews them:
 
 ```
 wa --web --port 59137 --cert ~/.config/wassup/tls/fullchain.pem --key ~/.config/wassup/tls/privkey.pem
@@ -179,11 +184,13 @@ certbot keeps the key readable by root only: a deploy hook can copy both files w
 
 Entry is by passkey, with no password: the device's fingerprint, face or PIN. On start, while there's none, it prints
 a single-use link valid for 15 minutes that registers the first (`--invite` prints one anyway); the menu in the
-corner (⋯) makes such links for other devices, with a QR code, and signs out. A session lasts 30 days unused. The
-browser's tab says what wa's does: the chat's name and its emoji, with its photo (or its initials on its colour) for
-icon, or 👾 on the chat list. An attachment opens in a tab of its own, from the server's media folder, and so does
-a link clicked in a message, which in the terminal is copied instead; on a phone a bar under the screen has the keys
-its keyboard lacks (Esc, Tab, the arrows, `/`).
+corner (⋯) makes such links for other devices, with a QR code, and signs out. Or by a code: the page asks the server
+to send one to your chat with yourself on WhatsApp, six digits that are good once and for 5 minutes (one a minute at
+most, void after 5 wrong tries), which also lets you in with no passkey registered yet or a browser without them. A
+session lasts 30 days unused. The browser's tab says what wa's does: the chat's name and its emoji, with its photo
+(or its initials on its colour) for icon, or 👾 on the chat list. An attachment opens in a tab of its own, from the
+server's media folder, and so does a link clicked in a message, which in the terminal is copied instead; on a phone a
+bar under the screen has the keys its keyboard lacks (Esc, Tab, the arrows, `/`).
 
 ## Writing suggestions
 

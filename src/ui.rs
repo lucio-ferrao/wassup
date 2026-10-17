@@ -33,7 +33,7 @@ pub fn frame<B: ratatui::backend::Backend>(app: &mut App, terminal: &mut Termina
         .map_err(|e| anyhow::anyhow!("{e:?}"))?;
     if let Some(w) = app.web.clone() {
         // The page: its pictures, its title and icon, what to copy; the rest is the frame (webtab.rs).
-        let _ = w.send(crate::app::WebMsg::Pictures(std::mem::take(&mut app.web_pics)));
+        let _ = w.send(crate::app::WebMsg::Frame(std::mem::take(&mut app.web_pics), app.web_panel.take()));
         // The page's tab says what wassup's tab does: the list's name and mark, or the chat's; its icon the chat's.
         let jid = if app.picker_open { None } else { app.current().map(String::from) };
         let title = match &jid {
@@ -94,7 +94,9 @@ pub fn frame<B: ratatui::backend::Backend>(app: &mut App, terminal: &mut Termina
 pub fn draw(f: &mut Frame, app: &mut App) {
     let area = f.area();
     app.hits.clear();
+    app.web_panel = None;
     if area.height < 5 || area.width < 16 {
+        app.page_top = None;
         return;
     }
     let tabs = Rect { y: area.y + area.height - 1, height: 1, ..area };
@@ -118,6 +120,9 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     // With the popup open, only its picture is placed.
     if app.viewing.is_some() {
         app.web_pics.clear();
+        if let Some(p) = app.web_panel.as_mut() {
+            p.pics.clear();
+        }
     }
     draw_viewer(f, app, area);
     big_text(f, app);
@@ -138,6 +143,25 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         }
     }
     draw_text_sel(f, app);
+    // For a browser, the chat's rows in view as the frame ended up with them, what floats over them included; with
+    // no chat drawn, the page has none on top.
+    match app.web_panel.as_mut() {
+        Some(p) => {
+            let (a, buf) = (p.area, f.buffer_mut());
+            p.view = (0..a.height)
+                .map(|k| {
+                    let mut row = ratatui::buffer::Buffer::empty(Rect::new(0, 0, a.width, 1));
+                    for x in 0..a.width {
+                        if let Some(c) = buf.cell((a.x + x, a.y + k)) {
+                            row[(x, 0)] = c.clone();
+                        }
+                    }
+                    row
+                })
+                .collect();
+        }
+        None => app.page_top = None,
+    }
 }
 
 /// The band: in a chat, as my next message on my bubbles' green, two rows at least, a row over them for what's being
