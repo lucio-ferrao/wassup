@@ -87,15 +87,21 @@ pub struct Store {
     db: Mutex<Connection>,
 }
 
-/// An attachment's or a photo's file as kept: relative to the media folder, so the data folder can move.
-fn rel(path: &str) -> String {
-    let media = crate::config_dir().join("media");
-    std::path::Path::new(path).strip_prefix(&media).map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|_| path.to_string())
+/// An attachment's or a photo's file as kept: its place in the media folder, so the data folder can move. Only the
+/// media folder's: one anywhere else isn't kept (None), and is had again.
+fn rel(path: &str) -> Option<String> {
+    let p = Path::new(path);
+    let inside = if p.is_absolute() { p.strip_prefix(crate::config_dir().join("media")).ok() } else { Some(p) };
+    let kept = inside.filter(|p| !p.as_os_str().is_empty() && p.components().all(|c| matches!(c, std::path::Component::Normal(_))));
+    if kept.is_none() {
+        log::warn!("store: {path} is outside the media folder, not kept");
+    }
+    kept.map(|p| p.to_string_lossy().into_owned())
 }
 
-/// A file kept relative to the media folder, where it is now.
+/// A file kept by its place in the media folder, where that folder is now.
 fn abs(path: Option<String>) -> Option<String> {
-    path.map(|p| if std::path::Path::new(&p).is_absolute() { p } else { crate::config_dir().join("media").join(p).to_string_lossy().into_owned() })
+    path.map(|p| crate::config_dir().join("media").join(p).to_string_lossy().into_owned())
 }
 
 const MSG_COLS: &str = "chat, id, from_me, sender, push_name, ts, kind, text, thumb, media, media_path, w, h, status, quoted, media_mime, media_name, media_err, key_chat, key_sender, preview";
@@ -178,6 +184,18 @@ impl Store {
         }
         // The photos a first version kept were the small ones ("avatar-…"): asked again, whole, as wassup keeps them.
         let _ = db.execute("UPDATE avatars SET fetched = 0 WHERE path LIKE '%avatar-%'", []);
+        // Files a first version kept by their whole path, which breaks once the data folder moves: by their place in
+        // the media folder, as every other is kept (rel); one outside a media folder isn't kept, and is had again.
+        for (table, key, column) in [("messages", "chat || ' ' || id", "media_path"), ("avatars", "jid", "path")] {
+            let whole: Vec<(String, String)> = db
+                .prepare(&format!("SELECT {key}, {column} FROM {table} WHERE {column} LIKE '/%'"))
+                .and_then(|mut q| q.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect())
+                .unwrap_or_default();
+            for (k, old) in whole {
+                let new = old.rfind("/media/").map(|at| old[at + "/media/".len()..].to_string()).filter(|n| !n.is_empty());
+                let _ = db.execute(&format!("UPDATE {table} SET {column} = ?1 WHERE {key} = ?2"), params![new, k]);
+            }
+        }
         Ok(Self { db: Mutex::new(db) })
     }
 
@@ -316,7 +334,7 @@ impl Store {
                key_sender = CASE WHEN excluded.key_sender = '' THEN messages.key_sender ELSE excluded.key_sender END",
             params![
                 m.chat, m.id, m.from_me, m.sender, m.push_name, m.ts, m.kind, m.text, m.thumb, m.media, m.w, m.h, m.status,
-                m.quoted, m.raw, m.key_chat, m.key_sender, m.media_mime, m.media_name, m.media_path.as_deref().map(rel), m.preview
+                m.quoted, m.raw, m.key_chat, m.key_sender, m.media_mime, m.media_name, m.media_path.as_deref().and_then(rel), m.preview
             ],
         )?;
         Self::touch_chat(db, &m.chat, None, m.ts)?;
@@ -468,7 +486,7 @@ impl Store {
         self.db.lock().unwrap().execute(
             "INSERT INTO avatars (jid, path, about, members, fetched) VALUES (?1, ?2, ?3, ?4, ?5)
              ON CONFLICT (jid) DO UPDATE SET path = ?2, about = ?3, members = ?4, fetched = ?5",
-            params![jid, p.avatar.as_deref().map(rel), p.about, p.members, p.fetched],
+            params![jid, p.avatar.as_deref().and_then(rel), p.about, p.members, p.fetched],
         )?;
         Ok(())
     }
@@ -749,5 +767,43 @@ impl Store {
         let db = self.db.lock().unwrap();
         let Ok(mut q) = db.prepare("SELECT key FROM state WHERE key LIKE 'biz:%' AND value = 'true'") else { return vec![] };
         q.query_map([], |r| r.get::<_, String>(0)).map(|rows| rows.flatten().map(|k| k[4..].to_string()).collect()).unwrap_or_default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Files kept by their whole path come back by their place in the media folder, wherever that folder was; one
+    /// outside a media folder isn't kept; those kept by their place stay.
+    #[test]
+    fn files_kept_inside_the_media_folder() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("target").join(format!("store-paths-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("wassup.db");
+        let _ = std::fs::remove_file(&path);
+        drop(Store::open(&path).unwrap());
+        let db = Connection::open(&path).unwrap();
+        let files = [
+            ("1", "/home/rita/.config/wassup-old/media/123456789012345@s.whatsapp.net/A1.jpg"),
+            ("2", "/srv/elsewhere/foto.jpg"),
+            ("3", "123456789012345@s.whatsapp.net/A3.jpg"),
+        ];
+        for (id, p) in files {
+            db.execute("INSERT INTO messages (chat, id, from_me, sender, ts, kind, media_path) VALUES ('c', ?1, 0, '', 0, 'image', ?2)", params![id, p]).unwrap();
+        }
+        db.execute("INSERT INTO avatars (jid, path, fetched) VALUES ('c', '/home/rita/.config/wassup-old/media/c/profile.jpg', 0)", []).unwrap();
+        drop(db);
+        let store = Store::open(&path).unwrap();
+        let db = store.db.lock().unwrap();
+        let kept: Vec<Option<String>> = db.prepare("SELECT media_path FROM messages ORDER BY id").unwrap().query_map([], |r| r.get(0)).unwrap().map(Result::unwrap).collect();
+        assert_eq!(kept, [Some("123456789012345@s.whatsapp.net/A1.jpg".into()), None, Some("123456789012345@s.whatsapp.net/A3.jpg".into())]);
+        let photo: Option<String> = db.query_row("SELECT path FROM avatars", [], |r| r.get(0)).unwrap();
+        assert_eq!(photo.as_deref(), Some("c/profile.jpg"));
+        drop(db);
+        assert_eq!(rel("../wassup.db"), None);
+        assert_eq!(rel("/etc/passwd"), None);
+        assert_eq!(rel("c/A1.jpg").as_deref(), Some("c/A1.jpg"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
