@@ -160,8 +160,7 @@ fn main() -> Result<()> {
 
     // What the terminal can do, asked before anything else runs (the picker sets nothing of tmux's this way).
     let caps = term::probe();
-    let herdr = crate::herdr::Herdr::detect();
-    let picker = term::picker(&caps, herdr.is_some());
+    let picker = term::picker(&caps);
     text::set_theme(text::Theme::new(caps.bg, caps.fg, caps.truecolor));
 
     let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;

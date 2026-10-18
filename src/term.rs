@@ -168,17 +168,16 @@ fn ask_all(caps: &mut Caps, wait: Duration) {
     }
 }
 
-/// How pictures are drawn: WA_IMAGES forces it; in a Herdr pane half-blocks (the multiplexer doesn't relay the
-/// pictures); else Kitty's graphics, sixels where the cells' size is known, or half-blocks. Made before anything
-/// else runs: ratatui-image sets an option of tmux's when it believes it's in one, which wassup never does, so it's
-/// not told.
-pub fn picker(caps: &Caps, in_herdr: bool) -> Picker {
+/// How pictures are drawn: WA_IMAGES forces it; else Kitty's graphics where the terminal answered the query (a
+/// Herdr pane does, since Herdr relays them), sixels where the cells' size is known, or half-blocks. Made before
+/// anything else runs: ratatui-image sets an option of tmux's when it believes it's in one, which wassup never
+/// does, so it's not told.
+pub fn picker(caps: &Caps) -> Picker {
     let forced = std::env::var("WA_IMAGES").ok();
     let kind = match forced.as_deref() {
         Some("kitty") => ProtocolType::Kitty,
         Some("sixel") => ProtocolType::Sixel,
         Some("blocks") | Some("none") => ProtocolType::Halfblocks,
-        _ if in_herdr => ProtocolType::Halfblocks,
         _ if caps.kitty_graphics => ProtocolType::Kitty,
         _ if caps.sixel && caps.cell.is_some() => ProtocolType::Sixel,
         _ => ProtocolType::Halfblocks,
