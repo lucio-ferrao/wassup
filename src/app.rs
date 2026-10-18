@@ -2372,6 +2372,9 @@ impl App {
     fn on_mouse(&mut self, m: ratatui::crossterm::event::MouseEvent) {
         let (x, y) = (m.column, m.row);
         match m.kind {
+            // Ghostty by itself reports the pointer moving with no button held as 34 rather than 35, which reads as
+            // dragging with the right button; that button does nothing here, so it's the pointer moving.
+            MouseEventKind::Drag(MouseButton::Right) => self.on_mouse(ratatui::crossterm::event::MouseEvent { kind: MouseEventKind::Moved, ..m }),
             MouseEventKind::Moved => {
                 self.pointer = Some((x, y));
                 self.tab_hover = match self.hit_at(x, y) {
