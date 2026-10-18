@@ -60,6 +60,7 @@ const EMOJI: &[(&str, &[&str], &[&str])] = &[
     ("🤒", &["doente", "febre"], &["sick", "face_with_thermometer"]),
     ("🥳", &["festa", "festejar"], &["party", "partying_face"]),
     ("🤗", &["abraco"], &["hug", "hugs"]),
+    ("🫂", &["abracao", "abraco_grande", "abraco"], &["people_hugging", "hug", "hugs"]),
     ("🤫", &["chiu", "silencio"], &["shush", "shushing_face"]),
     ("🤥", &["mentiroso", "pinoquio"], &["lying", "lying_face"]),
     ("🤮", &["enjoado", "vomitar"], &["vomit", "vomiting"]),
