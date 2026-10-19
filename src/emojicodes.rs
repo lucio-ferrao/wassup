@@ -399,12 +399,16 @@ pub fn emoji_codes() -> &'static [&'static str] {
     &codes().names
 }
 
+/// Names offered ahead of the others whenever they fit what's being typed, in this order: ":lo" gives the heart
+/// before the shorter "lol".
+const FIRST: &[&str] = &["love"];
+
 /// The list for what follows a ":" being typed (`prefix`), each emoji once with the code to show for it. First the
 /// smileys that start that way (":D" for "D"; for nothing yet, the basic ones, ":)", ":D", ":("...), in the order of
 /// their table. Then the emoji with a name in either language that starts with `prefix`, in any case, each with the
-/// first such name, one in `lang` when both languages have one: shorter names first, so an exact match ("fixe")
-/// comes before a longer one, and on a tie the emoji the name stands for when typed whole (":amor:", the heart)
-/// first, then the table's order.
+/// first such name, one in `lang` when both languages have one: those in FIRST ahead, then shorter names first, so an
+/// exact match ("fixe") comes before a longer one, and on a tie the emoji the name stands for when typed whole
+/// (":amor:", the heart) first, then the table's order.
 pub fn complete_emoji(prefix: &str, lang: Lang) -> Vec<Suggestion> {
     let mut out: Vec<Suggestion> = Vec::new();
     for &(faces, emoji) in EMOTICONS {
@@ -429,7 +433,10 @@ pub fn complete_emoji(prefix: &str, lang: Lang) -> Vec<Suggestion> {
         }
     }
     let owns = |&(emoji, name): &(&str, &str)| codes().emoji.get(name) == Some(&emoji);
-    named.sort_by(|a, b| a.1.chars().count().cmp(&b.1.chars().count()).then(owns(b).cmp(&owns(a))));
+    let first = |name: &str| FIRST.iter().position(|f| *f == name).unwrap_or(FIRST.len());
+    named.sort_by(|a, b| {
+        first(a.1).cmp(&first(b.1)).then(a.1.chars().count().cmp(&b.1.chars().count())).then(owns(b).cmp(&owns(a)))
+    });
     out.extend(named.into_iter().map(|(emoji, name)| Suggestion { emoji, code: format!(":{name}:") }));
     out
 }
@@ -539,6 +546,14 @@ mod tests {
     fn suggestions_owner_first_on_a_tie() {
         assert_eq!(shown(&complete_emoji("amor", Lang::Pt)), ["❤️:amor:", "😍:amor:", "🥰:amor:"]);
         assert_eq!(shown(&complete_emoji("COR", Lang::Pt))[..3], ["❤️:coracao:", "😍:coracao:", "🥰:coracoes:"]);
+    }
+
+    /// The names in FIRST come before shorter ones.
+    #[test]
+    fn suggestions_love_before_lol() {
+        assert_eq!(shown(&complete_emoji("lo", Lang::Pt)), ["❤\u{fe0f}:love:", "😍:love:", "🥰:love:", "😂:lol:", "🔒:lock:"]);
+        assert_eq!(shown(&complete_emoji("l", Lang::Pt))[..4], ["❤\u{fe0f}:love:", "😍:love:", "🥰:love:", "😂:lol:"]);
+        assert_eq!(shown(&complete_emoji("lol", Lang::Pt)), ["😂:lol:"]);
     }
 
     /// The name shown is in the user's language when both languages have one that fits.
