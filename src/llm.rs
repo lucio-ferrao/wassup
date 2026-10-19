@@ -355,9 +355,10 @@ fn agent(timeout: Duration, cancel: Option<&Cancel>) -> Agent {
     }
 }
 
-/// The error a cancelled request ends its connection with.
+/// The error a cancelled request ends its connection with. Not of the Interrupted kind, which std's readers take as a
+/// call to try again: a body being read when its request is cancelled would spin until the time limit.
 fn cancelled() -> ureq::Error {
-    io::Error::new(io::ErrorKind::Interrupted, "cancelled").into()
+    io::Error::other("cancelled").into()
 }
 
 /// Makes each connection of a request watch the request's `Cancel` while it waits for the server.
@@ -866,6 +867,32 @@ mod tests {
         // The server sees the connection closed, so it would stop working on the request.
         handle.join().unwrap();
         assert!(matches!(llm.mood(&[], &cancel), Err(Error::Cancelled)));
+    }
+
+    /// Cancelled once the answer has begun, while its body is still coming: the request ends at once, not when its
+    /// time is up (std's read_to_string retried an Interrupted error, spinning a thread at full speed meanwhile).
+    #[test]
+    fn cancelled_while_reading_the_answer() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        thread::spawn(move || {
+            let (mut s, _) = listener.accept().unwrap();
+            let mut buf = [0; 65536];
+            let _ = s.read(&mut buf);
+            s.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 100\r\n\r\n{\"choices\"").unwrap();
+            while matches!(s.read(&mut buf), Ok(n) if n > 0) {}
+        });
+        let llm = Llm::new(url, "model-x", Lang::En).with_timeout(Duration::from_secs(5));
+        let cancel = Cancel::new();
+        let c = cancel.clone();
+        thread::spawn(move || {
+            thread::sleep(Duration::from_millis(300));
+            c.cancel();
+        });
+        let start = Instant::now();
+        let got = llm.mood(&["Rita: hello".into()], &cancel);
+        assert!(matches!(got, Err(Error::Cancelled)), "{got:?}");
+        assert!(start.elapsed() < Duration::from_secs(1), "{:?}", start.elapsed());
     }
 
     #[test]
