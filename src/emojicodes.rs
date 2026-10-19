@@ -59,8 +59,8 @@ const EMOJI: &[(&str, &[&str], &[&str])] = &[
     ("😴", &["sono", "a_dormir"], &["sleeping"]),
     ("🤒", &["doente", "febre"], &["sick", "face_with_thermometer"]),
     ("🥳", &["festa", "festejar"], &["party", "partying_face"]),
-    ("🫂", &["abracao", "abraco_grande", "abraco"], &["people_hugging", "hug", "hugs"]),
-    ("🤗", &["abraco"], &["hug", "hugs"]),
+    ("🫂", &["abraco", "abracao", "abraco_grande"], &["hug", "hugs", "people_hugging"]),
+    ("🤗", &["abracinho", "abraco"], &["hugging_face", "hug", "hugs"]),
     ("🤫", &["chiu", "silencio"], &["shush", "shushing_face"]),
     ("🤥", &["mentiroso", "pinoquio"], &["lying", "lying_face"]),
     ("🤮", &["enjoado", "vomitar"], &["vomit", "vomiting"]),
@@ -554,6 +554,18 @@ mod tests {
         assert_eq!(shown(&complete_emoji("lo", Lang::Pt)), ["❤\u{fe0f}:love:", "😍:love:", "🥰:love:", "😂:lol:", "🔒:lock:"]);
         assert_eq!(shown(&complete_emoji("l", Lang::Pt))[..4], ["❤\u{fe0f}:love:", "😍:love:", "🥰:love:", "😂:lol:"]);
         assert_eq!(shown(&complete_emoji("lol", Lang::Pt)), ["😂:lol:"]);
+    }
+
+    /// The two people hugging come ahead of the hugging face, typed whole or being typed.
+    #[test]
+    fn big_hug_first() {
+        for code in [":abraco:", ":hug:", ":hugs:"] {
+            assert_eq!(emojify(code), "🫂", "{code}");
+        }
+        assert_eq!(emojify(":abracinho:"), "🤗");
+        assert_eq!(shown(&complete_emoji("hug", Lang::Pt)), ["🫂:hug:", "🤗:hugging_face:"]);
+        assert_eq!(shown(&complete_emoji("h", Lang::Pt))[0], "🫂:hug:");
+        assert_eq!(shown(&complete_emoji("abr", Lang::Pt)), ["🫂:abraco:", "🤗:abracinho:"]);
     }
 
     /// The name shown is in the user's language when both languages have one that fits.
