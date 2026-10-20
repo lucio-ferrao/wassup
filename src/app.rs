@@ -332,6 +332,9 @@ pub struct App {
     /// The model's word floating over the one it replaces: the word, its line, its column.
     pub ghost_float: Option<(String, usize, usize)>,
     pub prompt_w: u16,
+    /// The cell of the band's cursor, where the terminal shows its own: an accent typed with a dead key, which the
+    /// terminal draws at its cursor until the letter comes, appears there, Herdr or not.
+    pub caret: Option<(u16, u16)>,
     pub below_at: Option<(u16, u16)>,
     pub tabs_area: Rect,
 
@@ -501,6 +504,7 @@ impl App {
             band_header: false,
             ghost_float: None,
             prompt_w: 2,
+            caret: None,
             below_at: None,
             tabs_area: Rect::default(),
             title_shown: String::new(),

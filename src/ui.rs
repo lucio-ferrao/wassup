@@ -29,6 +29,12 @@ pub fn frame<B: ratatui::backend::Backend>(app: &mut App, terminal: &mut Termina
         .draw(|f| {
             draw(f, app);
             crate::unicode::settle(f.buffer_mut());
+            // In the terminal the band's cursor is the terminal's own, shown there; without it, hidden.
+            if app.web.is_none()
+                && let Some(at) = app.caret
+            {
+                f.set_cursor_position(at);
+            }
         })
         .map_err(|e| anyhow::anyhow!("{e:?}"))?;
     if let Some(w) = app.web.clone() {
@@ -277,6 +283,9 @@ fn draw_band(f: &mut Frame, app: &mut App, area: Rect) -> u16 {
     let tabs_y = area.y + area.height - 1;
     let top = tabs_y - total_h;
     let show_cursor = app.focus == Focus::Input || app.focus == Focus::Picker;
+    // The cursor drawn as a reversed cell only for a browser, which has no cursor of its own; in the terminal it's the
+    // terminal's (app.caret).
+    let reversed = if app.web.is_some() { Modifier::REVERSED } else { Modifier::empty() };
     // The passages the model found wrong, by their place in the whole text.
     let mut marked = std::collections::HashSet::new();
     if !app.picker_open && !searching {
@@ -338,11 +347,11 @@ fn draw_band(f: &mut Frame, app: &mut App, area: Rect) -> u16 {
                 let first_g = g.next().unwrap_or("").to_string();
                 let rest: String = g.collect();
                 let dim = Style::new().bg(band_bg).fg(theme().dim).add_modifier(Modifier::ITALIC);
-                spans.push(Span::styled(first_g, dim.add_modifier(Modifier::REVERSED)));
+                spans.push(Span::styled(first_g, dim.add_modifier(reversed)));
                 spans.push(Span::styled(rest, dim));
             } else {
                 let under = l.get(col).filter(|g| *g != "\n").cloned().unwrap_or_else(|| " ".into());
-                spans.push(Span::styled(under, Style::new().bg(band_bg).add_modifier(Modifier::REVERSED)));
+                spans.push(Span::styled(under, Style::new().bg(band_bg).add_modifier(reversed)));
                 if col < l.len() {
                     spans.extend(paint(&l[(col + 1).min(l.len())..], from + col + 1));
                 }
@@ -373,6 +382,10 @@ fn draw_band(f: &mut Frame, app: &mut App, area: Rect) -> u16 {
     f.render_widget(Paragraph::new(out), band);
     app.band_area = Rect { x: area.x, y: top, width: area.width, height: total_h };
     app.band_text = Rect { x: area.x + pw as u16, y: text_top + header_rows as u16, width: width as u16, height: rows_avail as u16 };
+    app.caret = show_cursor.then(|| {
+        let before: String = lines[row][..col.min(lines[row].len())].iter().filter(|g| *g != "\n").map(|g| crate::unicode::tame(g).into_owned()).collect();
+        (app.band_text.x + text::width(&before) as u16, app.band_text.y + (row - first) as u16)
+    });
     app.band_lines = lines;
     app.band_first = first;
     app.band_header = header_rows > 0;
