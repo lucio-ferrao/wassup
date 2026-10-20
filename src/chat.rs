@@ -598,6 +598,12 @@ fn bubble_row(p: Piece, inner: usize, msg: usize, mine: bool, bare: bool, indent
     r
 }
 
+/// Whether the chat's photo stands left of the band where you write instead of at the top: with Kitty's pictures, and
+/// in a browser, which places them the same way.
+pub fn photo_by_band(app: &App, jid: &str) -> bool {
+    (app.kitty.is_some() || app.web.is_some()) && !app.caps.no_images && app.store.avatar(jid).is_some()
+}
+
 /// The chat: its photo and name at the top, its rows under it, scrolled as the view is.
 pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
     let Some(jid) = app.current().map(String::from) else { return };
@@ -605,7 +611,7 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
     // where there's no room); its cells kept while it's decoded, so the name doesn't move.
     let name = app.store.name_of(&jid);
     let color = text::color_for(&jid);
-    let has_photo = app.store.avatar(&jid).is_some() && !app.caps.no_images;
+    let has_photo = app.store.avatar(&jid).is_some() && !app.caps.no_images && !photo_by_band(app, &jid);
     let room = area.width.saturating_sub(2 + if has_photo { 9 } else { 0 }) as usize;
     let big = if f.area().height >= 16 && app.caps.utf8 { big_text(&name, room) } else { None };
     let head: Vec<String> = big.clone().unwrap_or_else(|| vec![text::truncate(&name, room)]);

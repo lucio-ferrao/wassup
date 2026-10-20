@@ -111,8 +111,9 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     }
     // The band again over whatever the panels drew into its rows (a picture's last cells).
     draw_band(f, app, area);
+    draw_band_photo(f, app);
     draw_tabs(f, app, tabs);
-    draw_notice(f, app, tabs);
+    draw_notice(f, app, app.tabs_area);
     draw_suggestions(f, app);
     draw_ghost(f, app);
     draw_sent_fix(f, app);
@@ -172,9 +173,13 @@ fn draw_band(f: &mut Frame, app: &mut App, area: Rect) -> u16 {
     let searching = app.search.is_some() && !app.picker_open;
     let plain = !app.picker_open && (searching || app.current().is_none());
     let stamp_w = text::width(&text::my_time(0, 0)) + 1;
-    let band_w = w.saturating_sub(4 + stamp_w);
+    // In a chat with Kitty, its photo left of the band, which starts that much further right.
+    let by_band = photo_beside(app);
+    let off = band_off(app) as usize;
+    let lead = " ".repeat(1 + off);
+    let band_w = w.saturating_sub(4 + stamp_w + off);
     let who = if searching { s("search") } else { String::new() };
-    let pw = if plain { 1 + if who.is_empty() { 0 } else { text::width(&who) + 1 } + 2 } else { 2 };
+    let pw = if plain { 1 + if who.is_empty() { 0 } else { text::width(&who) + 1 } + 2 } else { 2 + off };
     app.prompt_w = pw as u16;
     let target = if app.picker_open || searching { None } else { app.reply_to.clone().or(app.react_to.clone()).or(app.editing.clone()) };
     let found = app.search.as_ref().filter(|q| !q.query.is_empty()).map(|q| if q.hits.is_empty() { s("searchNone") } else { t("searchHeader", &[&(q.at + 1), &q.hits.len()]) });
@@ -323,7 +328,7 @@ fn draw_band(f: &mut Frame, app: &mut App, area: Rect) -> u16 {
                 spans.push(Span::raw(" ".repeat(pw)));
             }
         } else {
-            spans.push(Span::raw(" "));
+            spans.push(Span::raw(lead.clone()));
             spans.push(Span::styled(" ", Style::new().bg(band_bg)));
         }
         if show_cursor && i == row {
@@ -353,13 +358,13 @@ fn draw_band(f: &mut Frame, app: &mut App, area: Rect) -> u16 {
     }
     if !plain {
         while out.len() < rows_avail {
-            out.push(Line::from(vec![Span::raw(" "), Span::styled(" ".repeat(band_w + 2), Style::new().bg(band_bg))]));
+            out.push(Line::from(vec![Span::raw(lead.clone()), Span::styled(" ".repeat(band_w + 2), Style::new().bg(band_bg))]));
         }
         if let Some(h) = &header {
             let style = if app.deleting.is_some() { Style::new().bg(band_bg).fg(Color::Red) } else { Style::new().bg(band_bg).fg(theme().dim) };
             let said = text::truncate(h, band_w);
             let pad = band_w.saturating_sub(text::width(&said));
-            out.insert(0, Line::from(vec![Span::raw(" "), Span::styled(" ", Style::new().bg(band_bg)), Span::styled(said, style), Span::styled(" ".repeat(pad + 1), Style::new().bg(band_bg))]));
+            out.insert(0, Line::from(vec![Span::raw(lead.clone()), Span::styled(" ", Style::new().bg(band_bg)), Span::styled(said, style), Span::styled(" ".repeat(pad + 1), Style::new().bg(band_bg))]));
         }
     }
     let text_top = top + if plain { 1 } else { 0 };
@@ -371,18 +376,50 @@ fn draw_band(f: &mut Frame, app: &mut App, area: Rect) -> u16 {
     app.band_lines = lines;
     app.band_first = first;
     app.band_header = header_rows > 0;
+    if by_band {
+        app.head_photo = Some(Rect { x: area.x + 1, y: tabs_y + 1 - BAND_PHOTO_ROWS, width: BAND_PHOTO_ROWS * 2, height: BAND_PHOTO_ROWS });
+    }
     // "↓" and how many are below, beside the band, while the chat is scrolled up; a click goes to the latest.
     app.below_at = None;
     if !plain && !app.picker_open && !app.at_bottom && app.current().is_some() {
         let below = below_count(app);
         let label = if below > 0 { format!("↓ {below}") } else { "↓".into() };
-        let x = area.x + band_w as u16 + 4;
+        let x = area.x + (off + band_w) as u16 + 4;
         let y = text_top + header_rows as u16;
         f.render_widget(Paragraph::new(Span::styled(label.clone(), Style::new().fg(theme().dim))), Rect { x, y, width: area.width.saturating_sub(x), height: 1 });
         app.hits.push((x, y, text::width(&label) as u16, Hit::Below));
         app.below_at = Some((x, y));
     }
     total_h
+}
+
+/// How tall the chat's photo left of the band is, square, as it was beside the chat's big name: the band's last two
+/// rows and the tabs' row.
+const BAND_PHOTO_ROWS: u16 = 3;
+
+/// Whether the chat's photo is left of the band and the tabs: in a chat, not searching it, where photo_by_band says.
+fn photo_beside(app: &App) -> bool {
+    !app.picker_open && app.search.is_none() && app.current().is_some_and(|j| crate::chat::photo_by_band(app, j))
+}
+
+/// How much further right the band and the tabs start for the photo left of them.
+fn band_off(app: &App) -> u16 {
+    if photo_beside(app) { BAND_PHOTO_ROWS * 2 + 1 } else { 0 }
+}
+
+/// The chat's photo left of the band, where draw_band left room for it; a click opens it large.
+fn draw_band_photo(f: &mut Frame, app: &mut App) {
+    let (Some(r), Some(jid)) = (app.head_photo, app.current().map(String::from)) else { return };
+    if !crate::chat::photo_by_band(app, &jid) {
+        return;
+    }
+    for k in 0..r.height {
+        app.hits.push((r.x, r.y + k, r.width, Hit::HeadPhoto));
+    }
+    if let Some(img) = app.avatar(&jid) {
+        let font = app.picker.font_size();
+        crate::chat::draw_whole(f, app, &format!("avatar:{jid}"), &img, r, Size::new(font.width, font.height));
+    }
 }
 
 /// How many messages are below the view, all of their rows out of it.
@@ -444,6 +481,8 @@ fn sgr_bg(c: Color) -> String {
 /// for them to fit, down to six. Against the right edge a passing message, or the connection's state when it needs
 /// attention.
 fn draw_tabs(f: &mut Frame, app: &mut App, bar: Rect) {
+    let off = band_off(app).min(bar.width);
+    let bar = Rect { x: bar.x + off, width: bar.width - off, ..bar };
     app.tabs_area = bar;
     let list: Vec<String> = if app.fixed() { app.current().map(|c| vec![c.to_string()]).unwrap_or_default() } else { app.tabs.clone() };
     let active_at = if app.picker_open { None } else if app.fixed() { Some(0) } else { Some(app.active) };
