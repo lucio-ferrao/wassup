@@ -194,13 +194,7 @@ async fn run(dir: PathBuf, demo: bool, wanted: Option<String>, caps: term::Caps,
     // Keys, the mouse and the focus, read on a thread of their own once the terminal is in raw mode.
     let (tx, rx) = unbounded_channel();
     let reader = tx.clone();
-    std::thread::spawn(move || {
-        while let Ok(ev) = ratatui::crossterm::event::read() {
-            if reader.send(Input::Term(ev)).is_err() {
-                break;
-            }
-        }
-    });
+    std::thread::spawn(move || term::read_keys(|ev| reader.send(Input::Term(ev)).is_ok()));
     let kitty_keyboard = caps.kitty_keyboard;
     let app = App::new(store, backend, picker, caps, wanted, tx);
     if demo {

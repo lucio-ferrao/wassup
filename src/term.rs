@@ -6,6 +6,7 @@
 //! thread, DA1 (which every terminal answers) closing each round.
 
 use std::io::Write;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use ratatui::crossterm::terminal::{disable_raw_mode, enable_raw_mode};
@@ -109,6 +110,65 @@ pub fn probe() -> Caps {
     caps
 }
 
+/// The terminal asked again while the screen is wassup's, as `probe` asked it at startup but without leaving the
+/// screen: a Herdr pane seen from another terminal, or the same session taken up from another. The keys' reader is
+/// held meanwhile (`hold_reader`), so that the answers come here and not as keys. What `probe` measured of emoji widths
+/// and the colours stay as they were.
+pub fn probe_again(before: &Caps) -> Caps {
+    let mut caps = Caps { utf8: before.utf8, no_images: before.no_images, ..Default::default() };
+    hold_reader(true);
+    ask_all(&mut caps, Duration::from_millis(600));
+    hold_reader(false);
+    match std::env::var("WA_COLORS").as_deref() {
+        Ok("truecolor") => caps.truecolor = true,
+        Ok("256") => caps.truecolor = false,
+        _ => {}
+    }
+    log::info!("terminal again: {caps:?}");
+    caps
+}
+
+/// Whether the keys' reader is to wait, and whether it is waiting.
+static HOLD: AtomicBool = AtomicBool::new(false);
+static HELD: AtomicBool = AtomicBool::new(false);
+
+/// Holds the keys' reader (`read_keys`) until released, waiting for it to stop reading (a second at most).
+fn hold_reader(hold: bool) {
+    HOLD.store(hold, Ordering::SeqCst);
+    if hold {
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while !HELD.load(Ordering::SeqCst) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+}
+
+/// Reads the keys, the mouse and the focus for `send` until it says no more or the terminal is gone, stopping
+/// while `hold_reader` holds it.
+pub fn read_keys(mut send: impl FnMut(ratatui::crossterm::event::Event) -> bool) {
+    use ratatui::crossterm::event;
+    loop {
+        if HOLD.load(Ordering::SeqCst) {
+            HELD.store(true, Ordering::SeqCst);
+            std::thread::sleep(Duration::from_millis(5));
+            continue;
+        }
+        HELD.store(false, Ordering::SeqCst);
+        match event::poll(Duration::from_millis(50)) {
+            Ok(true) => match event::read() {
+                Ok(ev) => {
+                    if !send(ev) {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            },
+            Ok(false) => {}
+            Err(_) => break,
+        }
+    }
+}
+
 fn ask_all(caps: &mut Caps, wait: Duration) {
     // 1. Who it is (XTVERSION), whether it takes Kitty's keyboard protocol, and DA1 (sixels among its attributes).
     let first = ask("\x1b[>0q\x1b[?u", wait);
@@ -173,17 +233,9 @@ fn ask_all(caps: &mut Caps, wait: Duration) {
 /// anything else runs: ratatui-image sets an option of tmux's when it believes it's in one, which wassup never
 /// does, so it's not told.
 pub fn picker(caps: &Caps) -> Picker {
-    let forced = std::env::var("WA_IMAGES").ok();
-    let kind = match forced.as_deref() {
-        Some("kitty") => ProtocolType::Kitty,
-        Some("sixel") => ProtocolType::Sixel,
-        Some("blocks") | Some("none") => ProtocolType::Halfblocks,
-        _ if caps.kitty_graphics => ProtocolType::Kitty,
-        _ if caps.sixel && caps.cell.is_some() => ProtocolType::Sixel,
-        _ => ProtocolType::Halfblocks,
-    };
+    let kind = kind(caps);
     let (w, h) = caps.cell.unwrap_or((10, 20));
-    let tmux = std::env::var("TERM").is_ok_and(|t| t.starts_with("tmux")) || std::env::var("TERM_PROGRAM").as_deref() == Ok("tmux");
+    let tmux = in_tmux();
     let saved = (std::env::var_os("TERM"), std::env::var_os("TERM_PROGRAM"));
     if tmux {
         // SAFETY: called from main before any other thread is started.
@@ -209,4 +261,34 @@ pub fn picker(caps: &Caps) -> Picker {
     picker.set_protocol_type(kind);
     log::info!("pictures: {kind:?}, cells of {w}x{h} pixels");
     picker
+}
+
+/// The picker made again for what the terminal said when asked again. In tmux the one there is kept, with its cells'
+/// size, only its way of drawing changed: a new one would set tmux's option, as `picker` explains.
+pub fn repick(picker: &mut Picker, caps: &Caps) {
+    let kind = kind(caps);
+    let (w, h) = caps.cell.unwrap_or((10, 20));
+    if !in_tmux() {
+        #[allow(deprecated)]
+        let fresh = Picker::from_fontsize(FontSize::new(w, h));
+        *picker = fresh;
+    }
+    picker.set_protocol_type(kind);
+    log::info!("pictures again: {kind:?}, cells of {w}x{h} pixels");
+}
+
+/// How pictures are drawn, as `picker` says.
+fn kind(caps: &Caps) -> ProtocolType {
+    match std::env::var("WA_IMAGES").ok().as_deref() {
+        Some("kitty") => ProtocolType::Kitty,
+        Some("sixel") => ProtocolType::Sixel,
+        Some("blocks") | Some("none") => ProtocolType::Halfblocks,
+        _ if caps.kitty_graphics => ProtocolType::Kitty,
+        _ if caps.sixel && caps.cell.is_some() => ProtocolType::Sixel,
+        _ => ProtocolType::Halfblocks,
+    }
+}
+
+fn in_tmux() -> bool {
+    std::env::var("TERM").is_ok_and(|t| t.starts_with("tmux")) || std::env::var("TERM_PROGRAM").as_deref() == Ok("tmux")
 }

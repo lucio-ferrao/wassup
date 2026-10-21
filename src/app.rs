@@ -342,6 +342,10 @@ pub struct App {
     pub icon_shown: String,
     pub unread_shown: u32,
     pub clear_screen: bool,
+    /// When to ask the terminal again what it can do, and whether to start its pictures afresh even if it says the
+    /// same: half a second after it last changed size (another terminal taking up the Herdr pane, mostly), or at once
+    /// with Ctrl+L.
+    pub reprobe_at: Option<(Instant, bool)>,
     pub bell: bool,
     pub clipboard: Option<String>,
     /// In a browser's tab: where what isn't a frame goes, and the frame's pictures.
@@ -511,6 +515,7 @@ impl App {
             icon_shown: String::new(),
             unread_shown: 0,
             clear_screen: false,
+            reprobe_at: None,
             bell: false,
             clipboard: None,
             web: None,
@@ -2042,6 +2047,10 @@ impl App {
                 self.scaled.clear();
                 self.rows_dirty = true;
                 self.list_dirty = true;
+                if self.web.is_none() {
+                    let force = self.reprobe_at.is_some_and(|(_, f)| f);
+                    self.reprobe_at = Some((Instant::now() + Duration::from_millis(500), force));
+                }
             }
             _ => {}
         }
@@ -2057,6 +2066,13 @@ impl App {
         }
         if ctrl && k.code == KeyCode::Char('c') {
             self.quit = true;
+            return;
+        }
+        // Ctrl+L asks the terminal again what it can do, and draws the whole screen again.
+        if ctrl && k.code == KeyCode::Char('l') {
+            if self.web.is_none() {
+                self.reprobe_at = Some((Instant::now(), true));
+            }
             return;
         }
         // Ctrl+R draws the whole screen again.
@@ -2818,6 +2834,28 @@ impl App {
     // ---------- the clock ----------
 
     /// What's due now: the clock's work, and when it should look again.
+    /// Asks the terminal again what it can do and, where it now draws pictures another way or its cells have another
+    /// size (or with `force`), starts its pictures afresh that way; the screen is drawn again whole.
+    fn reprobe(&mut self, force: bool) {
+        let caps = crate::term::probe_again(&self.caps);
+        let same = |a: &Caps| (a.kitty_graphics, a.sixel, a.cell, a.version.clone());
+        let changed = same(&caps) != same(&self.caps);
+        self.caps = caps;
+        if changed || force {
+            if let Some(k) = self.kitty.as_mut() {
+                k.dispose(&mut std::io::stdout());
+            }
+            crate::term::repick(&mut self.picker, &self.caps);
+            let kitty = self.picker.protocol_type() == ratatui_image::picker::ProtocolType::Kitty;
+            self.kitty = kitty.then(crate::kitty::Kitty::new);
+            self.crops.clear();
+            self.scaled.clear();
+            self.rows_dirty = true;
+            self.list_dirty = true;
+        }
+        self.clear_screen = true;
+    }
+
     pub fn tick(&mut self) -> Option<Duration> {
         let now = Instant::now();
         let mut next: Vec<Duration> = Vec::new();
@@ -2848,6 +2886,14 @@ impl App {
                 if text == self.input {
                     self.request_ghost(text);
                 }
+            } else {
+                next.push(due - now);
+            }
+        }
+        if let Some((due, force)) = self.reprobe_at {
+            if now >= due {
+                self.reprobe_at = None;
+                self.reprobe(force);
             } else {
                 next.push(due - now);
             }
