@@ -2340,7 +2340,7 @@ impl App {
                 self.react_to = None;
                 self.set_focus(Focus::Input);
             }
-            KeyCode::Backspace if self.selected.is_some() => {
+            KeyCode::Left if self.selected.is_some() => {
                 let id = self.selected.clone().unwrap_or_default();
                 self.edit_message(&id);
             }
