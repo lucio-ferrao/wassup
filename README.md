@@ -10,13 +10,16 @@ at the tag `node`, and the comments that name its files (`ui.ts`, `wa.ts` …) m
 ## Running
 
 ```sh
-cargo install --git https://github.com/lucio-ferrao/wassup
+curl -fsSL https://raw.githubusercontent.com/lucio-ferrao/wassup/main/install.sh | sh
 wa              # from anywhere: opens on the chat list
 wa emma         # opens straight into the chat whose name or number contains "emma"
 wa --demo       # invented chats, with no WhatsApp behind, to try it out
 ```
 
-`cargo install` builds it (a couple of minutes the first time) and puts `wa` in `~/.cargo/bin`. Or, from a clone:
+The script installs for your user only, nothing as root: Rust from rustup into your home folder if `cargo` isn't
+there (or is older than 1.88), then `wa`, built from this repository (a few minutes the first time) into
+`~/.cargo/bin`. It only needs a C compiler already installed, and the same line updates it later. With Rust already
+there, the same is `cargo install --git https://github.com/lucio-ferrao/wassup --locked`; or, from a clone,
 `cargo build --release`, then `target/release/wa`. The dictionaries, the emoji font and the web page are inside the
 program, so the one file is all it needs.
 
