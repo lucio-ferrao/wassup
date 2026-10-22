@@ -100,6 +100,7 @@ pub fn frame<B: ratatui::backend::Backend>(app: &mut App, terminal: &mut Termina
 pub fn draw(f: &mut Frame, app: &mut App) {
     let area = f.area();
     app.hits.clear();
+    app.caret = None;
     app.web_panel = None;
     if area.height < 5 || area.width < 16 {
         app.page_top = None;
@@ -382,10 +383,11 @@ fn draw_band(f: &mut Frame, app: &mut App, area: Rect) -> u16 {
     f.render_widget(Paragraph::new(out), band);
     app.band_area = Rect { x: area.x, y: top, width: area.width, height: total_h };
     app.band_text = Rect { x: area.x + pw as u16, y: text_top + header_rows as u16, width: width as u16, height: rows_avail as u16 };
-    app.caret = show_cursor.then(|| {
+    // The band's cursor; a message edited in its bubble puts its own (chat::draw).
+    if show_cursor {
         let before: String = lines[row][..col.min(lines[row].len())].iter().filter(|g| *g != "\n").map(|g| crate::unicode::tame(g).into_owned()).collect();
-        (app.band_text.x + text::width(&before) as u16, app.band_text.y + (row - first) as u16)
-    });
+        app.caret = Some((app.band_text.x + text::width(&before) as u16, app.band_text.y + (row - first) as u16));
+    }
     app.band_lines = lines;
     app.band_first = first;
     app.band_header = header_rows > 0;

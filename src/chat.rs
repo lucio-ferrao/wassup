@@ -57,6 +57,8 @@ pub struct Row {
     pub aside: Option<(u16, String)>,
     /// What's under a picture drawn in a bubble: the bubble's row.
     pub under: Option<Line<'static>>,
+    /// The column of the cursor, on the row of a message edited in its bubble that has it.
+    pub caret: Option<u16>,
 }
 
 impl Row {
@@ -65,7 +67,7 @@ impl Row {
     }
 
     fn line(l: Line<'static>, msg: Option<usize>) -> Self {
-        Self { kind: RowKind::Line(l), msg, header: false, icon: None, text: None, links: vec![], names: vec![], fixes: vec![], picture: None, preview: false, aside: None, under: None }
+        Self { kind: RowKind::Line(l), msg, header: false, icon: None, text: None, links: vec![], names: vec![], fixes: vec![], picture: None, preview: false, aside: None, under: None, caret: None }
     }
 }
 
@@ -80,6 +82,8 @@ struct Piece {
     header: bool,
     /// A link preview's row: the picture's width, height and which of its rows.
     pic: Option<(u16, u16, u16)>,
+    /// The cursor's column in it, for a message edited in its bubble.
+    caret: Option<u16>,
 }
 
 impl Piece {
@@ -278,7 +282,7 @@ fn text_pieces(app: &App, m: &Msg, width: usize, base: Style, words: &[String], 
         if !run.is_empty() {
             spans.push(Span::styled(run, *styles.last().unwrap_or(&base)));
         }
-        out.push(Piece { spans, text: true, links, names, fixes: piece_fixes, header: false, pic: None });
+        out.push(Piece { spans, text: true, links, names, fixes: piece_fixes, header: false, pic: None, caret: None });
     }
     out
 }
@@ -320,12 +324,15 @@ pub fn layout(app: &mut App, width: u16, cell: Size) -> Vec<Row> {
             text::fmt_time(m.ts)
         };
         let stamp_w = text::width(&stamp);
-        let bare = m.kind == "text" && crate::emojicodes::emoji_only(&m.text);
+        // Edited in its bubble: its text as it's being written, in a bubble even when it's emoji alone.
+        let editing = app.inline_edit.as_ref().filter(|e| e.id == m.id).cloned();
+        let bare = editing.is_none() && m.kind == "text" && crate::emojicodes::emoji_only(&m.text);
         let indent = if mine || bare { 0 } else { 1 };
         let text_w = if mine { width_us.saturating_sub(2 + stamp_w) } else { width_us.saturating_sub(indent) };
         let wrap_at = if bare { text_w } else { text_w.saturating_sub(1).max(1) };
         let selected_here = selected.as_deref() == Some(m.id.as_str());
-        let paint = !selected_here && dragged.as_deref() != Some(m.id.as_str());
+        // Painted in its bubble's colour unless selected or dragged; edited in its bubble, it keeps it.
+        let paint = editing.is_some() || (!selected_here && dragged.as_deref() != Some(m.id.as_str()));
 
         // The message's lines in order: pieces in the bubble, and rows out of it (pictures), kept apart.
         enum Part {
@@ -445,7 +452,9 @@ pub fn layout(app: &mut App, width: u16, cell: Size) -> Vec<Row> {
                 }
             }
         }
-        if !m.text.is_empty() && matches!(m.kind.as_str(), "text" | "image" | "video" | "gif" | "document") {
+        if let Some(ed) = &editing {
+            parts.extend(edit_pieces(&ed.text, ed.cursor, wrap_at).into_iter().map(Part::In));
+        } else if !m.text.is_empty() && matches!(m.kind.as_str(), "text" | "image" | "video" | "gif" | "document") {
             let fixes = if words.is_empty() && mine && m.kind == "text" && (last_mine.as_deref() == Some(m.id.as_str()) || selected_here) { app.sent_fixes_for(m).unwrap_or_default() } else { vec![] };
             // Emoji on their own, one to three, twice their size where the terminal shows pictures.
             let big: Vec<String> = if bare && (app.caps.text_sizing || app.web.is_some() || (!blocks && !app.caps.no_images)) {
@@ -548,6 +557,39 @@ pub fn layout(app: &mut App, width: u16, cell: Size) -> Vec<Row> {
     rows
 }
 
+/// The text of a message edited in its bubble as its lines, wrapped as the band wraps (compose::wrap_chars), the
+/// line with the cursor knowing its column; past the end of a full line, the cursor starts the next.
+fn edit_pieces(value: &str, cursor: usize, width: usize) -> Vec<Piece> {
+    let gs = crate::compose::graphemes(value);
+    let cursor = cursor.min(gs.len());
+    let mut lines = crate::compose::wrap_chars(&gs, width);
+    let mut row = 0;
+    let mut start = 0;
+    while row + 1 < lines.len() && cursor >= start + lines[row].len() {
+        start += lines[row].len();
+        row += 1;
+    }
+    let mut col = cursor - start;
+    let drawn = |l: &[String]| l.iter().filter(|g| *g != "\n").map(|g| crate::unicode::tame(g).into_owned()).collect::<String>();
+    if col >= lines[row].len() && text::width(&drawn(&lines[row])) >= width {
+        lines.push(vec![]);
+        row += 1;
+        col = 0;
+    }
+    lines
+        .iter()
+        .enumerate()
+        .map(|(k, l)| {
+            let mut p = Piece::plain(drawn(l), Style::new());
+            p.text = true;
+            if k == row {
+                p.caret = Some(text::width(&drawn(&l[..col.min(l.len())])) as u16);
+            }
+            p
+        })
+        .collect()
+}
+
 /// Where the "☺" goes on the time's row: a cell after the time for theirs, two before the text for mine.
 fn icon_at(mine: bool, content_start: usize, time_end: usize) -> u16 {
     if mine { content_start.saturating_sub(3) as u16 } else { (time_end + 1) as u16 }
@@ -562,6 +604,7 @@ fn bubble_row(p: Piece, inner: usize, msg: usize, mine: bool, bare: bool, indent
     let bg = if mine { theme().mine } else { theme().theirs };
     let pad = if bare { 0 } else { 1 };
     let w = p.width();
+    let caret = p.caret;
     // Where the bubble starts and where this row's text does.
     let (start, content) = if mine { (text_w.saturating_sub(inner + pad), text_w.saturating_sub(w)) } else { (indent.saturating_sub(pad), indent) };
     let bgs = |s: Style| if paint && !bare { s.bg(bg) } else { s };
@@ -589,6 +632,7 @@ fn bubble_row(p: Piece, inner: usize, msg: usize, mine: bool, bare: bool, indent
         return r;
     }
     r.header = p.header;
+    r.caret = caret.map(|x| c + x);
     if p.text {
         r.text = Some((c, c + w as u16));
     }
@@ -674,6 +718,8 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
     let total = app.rows.len();
     let height = body.height as usize;
     let selected = app.selected.as_deref().and_then(|id| app.msgs.iter().position(|m| m.id == id));
+    // The message edited in its bubble isn't greyed as the selection is.
+    let edited = app.inline_edit.as_ref().and_then(|e| app.msgs.iter().position(|m| m.id == e.id));
     if std::mem::take(&mut app.keep_selected_in_view)
         && let Some(sel) = selected {
             let first = app.rows.iter().position(|r| r.msg == Some(sel));
@@ -709,9 +755,13 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
     let quick = app.quick_for.as_deref().and_then(|id| app.msgs.iter().position(|m| m.id == id));
     let dragged = app.drag.as_ref().and_then(|(id, dx)| app.msgs.iter().position(|m| m.id == *id).map(|i| (i, *dx)));
     let mut icon: Option<(usize, u16, u16)> = None;
+    let mut caret: Option<(u16, u16)> = None;
     let rows: Vec<Row> = app.rows[start..end].to_vec();
     for (k, row) in rows.iter().enumerate() {
         let y = body.y + pad + k as u16;
+        if let Some(x) = row.caret {
+            caret = Some((body.x + x, y));
+        }
         let full = Rect { y, height: 1, ..body };
         let mut rect = full;
         if let (Some((m, dx)), Some(rm)) = (dragged, row.msg)
@@ -723,7 +773,7 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
                 let shift = dragged.filter(|(d, _)| *d == m).map(|(_, dx)| dx).unwrap_or(0);
                 icon = Some((m, x + shift, y));
             }
-        paint_row(f.buffer_mut(), row, rect, full, selected.is_some() && row.msg == selected);
+        paint_row(f.buffer_mut(), row, rect, full, selected.is_some() && row.msg == selected && row.msg != edited);
         match &row.kind {
             RowKind::Line(_) => {}
             RowKind::Image { x, cols, rows, index, preview, .. } => {
@@ -738,6 +788,13 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
                     emojis.push((row.msg.unwrap_or(0), *x, y));
                 }
             }
+        }
+    }
+    // The cursor of a message edited in its bubble: the terminal's own, or for a browser a reversed cell.
+    if let Some((x, y)) = caret {
+        app.caret = Some((x, y));
+        if web && let Some(c) = f.buffer_mut().cell_mut((x, y)) {
+            c.modifier.toggle(Modifier::REVERSED);
         }
     }
     // A browser has every picture of the chat from the panel (web_panel): those in view are drawn as in a terminal,
@@ -1081,4 +1138,32 @@ fn draw_picture(f: &mut Frame, app: &mut App, msg: usize, rect: Rect, full_rows:
         f.render_widget(Image::new(proto), rect);
     }
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn shown(p: &Piece) -> String {
+        p.spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    /// The text being edited wrapped as the band wraps it, the cursor's column on its line only.
+    #[test]
+    fn edited_text_and_its_cursor() {
+        let p = edit_pieces("vamos ao cinema", 15, 10);
+        assert_eq!(p.iter().map(shown).collect::<Vec<_>>(), ["vamos ao ", "cinema"]);
+        assert_eq!(p.iter().map(|p| p.caret).collect::<Vec<_>>(), [None, Some(6)]);
+        let p = edit_pieces("vamos ao cinema", 2, 10);
+        assert_eq!(p[0].caret, Some(2));
+        // A new line typed, and the cursor after it on an empty one.
+        let p = edit_pieces("até já\n", 7, 20);
+        assert_eq!(p.iter().map(shown).collect::<Vec<_>>(), ["até já", ""]);
+        assert_eq!(p[1].caret, Some(0));
+        // At the end of a full line, the cursor starts the next.
+        let p = edit_pieces("abcdefghij", 10, 10);
+        assert_eq!(p.len(), 2);
+        assert_eq!(p[1].caret, Some(0));
+        assert_eq!(edit_pieces("", 0, 10)[0].caret, Some(0));
+    }
 }

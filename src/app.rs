@@ -40,6 +40,16 @@ pub const SUGGEST_ROWS: usize = 5;
 /// Frames of the flight of a message just sent from the band to its place.
 pub const FLY_FRAMES: u32 = 5;
 
+/// A message of mine being edited where it stands in the chat: its id, its text as it now is, the cursor in it (in
+/// graphemes), and the text it had.
+#[derive(Clone, Debug)]
+pub struct InlineEdit {
+    pub id: String,
+    pub text: String,
+    pub cursor: usize,
+    pub was: String,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Focus {
     Picker,
@@ -224,6 +234,8 @@ pub struct App {
     pub reply_to: Option<String>,
     pub react_to: Option<String>,
     pub editing: Option<String>,
+    /// The message of mine being edited in its bubble, with ←; Enter saves it, Esc gives it up.
+    pub inline_edit: Option<InlineEdit>,
     pub deleting: Option<(String, bool)>,
     pub search: Option<Search>,
     pub keep_selected_in_view: bool,
@@ -416,6 +428,7 @@ impl App {
             reply_to: None,
             react_to: None,
             editing: None,
+            inline_edit: None,
             deleting: None,
             search: None,
             keep_selected_in_view: false,
@@ -757,6 +770,7 @@ impl App {
     }
 
     fn switch_draft(&mut self, from: Option<&str>, to: Option<&str>) {
+        self.inline_edit = None;
         if let Some(f) = from {
             if self.input.is_empty() {
                 self.drafts.remove(f);
@@ -988,6 +1002,9 @@ impl App {
 
     pub fn set_focus(&mut self, f: Focus) {
         self.focus = f;
+        if f != Focus::Messages && self.inline_edit.take().is_some() {
+            self.rows_dirty = true;
+        }
         if f != Focus::Messages && self.selected.take().is_some() {
             self.rows_dirty = true;
         }
@@ -1187,6 +1204,9 @@ impl App {
 
     /// Pasted text goes in whole at the cursor: with its lines in the band, on one line in the filter.
     fn paste(&mut self, text: &str) {
+        if self.inline_edit.is_some() {
+            return self.inline_insert(text);
+        }
         if let Some(s) = self.search.as_mut() {
             let ins = text.split_whitespace().collect::<Vec<_>>().join(" ");
             let v = format!("{}{ins}{}", compose::before(&s.query, s.cursor), compose::after(&s.query, s.cursor));
@@ -1684,18 +1704,72 @@ impl App {
         }
     }
 
+    /// Opens one of my text messages for editing in its bubble, the cursor at its end; the band keeps its draft.
     fn edit_message(&mut self, id: &str) {
         let Some(m) = self.msg(id).cloned() else { return };
         if !m.from_me || m.kind != "text" {
             return self.flash(s("onlyOwnText"), 6);
         }
-        self.editing = Some(m.id.clone());
+        let text = bare_text(&m.text).to_string();
+        self.inline_edit = Some(InlineEdit { id: m.id.clone(), cursor: compose::len(&text), was: text.clone(), text });
         self.reply_to = None;
         self.react_to = None;
+        self.deleting = None;
+        self.selected = Some(m.id.clone());
+        self.set_focus(Focus::Messages);
+        self.rows_dirty = true;
+        self.keep_selected_in_view = true;
+    }
+
+    /// A key while a message is edited in its bubble: Enter saves, Esc gives up, Shift+Enter or Ctrl+J a new line,
+    /// the band's editing keys the rest.
+    fn inline_key(&mut self, k: KeyEvent, ctrl: bool, shift: bool) {
+        if k.code == KeyCode::Esc {
+            self.inline_edit = None;
+            self.rows_dirty = true;
+            return;
+        }
+        if (k.code == KeyCode::Enter && shift) || (ctrl && k.code == KeyCode::Char('j')) {
+            return self.inline_insert("\n");
+        }
+        if k.code == KeyCode::Enter {
+            return self.save_inline();
+        }
+        let Some(e) = edit_key(&k) else { return };
+        if let Some(ed) = self.inline_edit.as_mut() {
+            (ed.text, ed.cursor) = compose::edit(&ed.text, ed.cursor, e);
+        }
+        self.rows_dirty = true;
+        self.keep_selected_in_view = true;
+    }
+
+    fn inline_insert(&mut self, text: &str) {
+        if let Some(ed) = self.inline_edit.as_mut() {
+            (ed.text, ed.cursor) = compose::edit(&ed.text, ed.cursor, Edit::Insert(text.to_string()));
+        }
+        self.rows_dirty = true;
+        self.keep_selected_in_view = true;
+    }
+
+    /// Sends the edit of the message in its bubble, its ":code:"s as emoji, and goes back to the band; nothing when
+    /// it's empty, and it's only closed when it's the same as it was.
+    fn save_inline(&mut self) {
+        let Some(ed) = self.inline_edit.clone() else { return };
+        let text = emojicodes::emojify(ed.text.trim());
+        if text.is_empty() {
+            return;
+        }
+        if text != ed.was.trim() {
+            if !self.is_open() {
+                return self.flash(s("noConnection"), 6);
+            }
+            if let Some(jid) = self.current().map(String::from) {
+                self.backend.edit(&jid, &ed.id, &text);
+            }
+        }
+        self.inline_edit = None;
+        self.rows_dirty = true;
         self.set_focus(Focus::Input);
-        self.input = bare_text(&m.text).to_string();
-        self.cursor = compose::len(&self.input);
-        self.update_suggestions(150);
     }
 
     fn delete_message(&mut self, id: &str, for_everyone: bool) {
@@ -2085,6 +2159,9 @@ impl App {
             return self.close_viewer();
         }
         self.sent_fix = None;
+        if self.inline_edit.is_some() {
+            return self.inline_key(k, ctrl, shift);
+        }
         if self.search.is_some() {
             return self.search_key(k);
         }
