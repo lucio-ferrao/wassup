@@ -1,0 +1,65 @@
+# The program built for Linux, static (musl), for x86_64 and 64-bit ARM, so install.sh can fetch it instead of
+# building it. A tag v* builds both and attaches them to that tag's release, made if it isn't there; run by hand, it
+# only builds them, kept as the run's artifacts, to try the build without releasing anything.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+            arch: x86_64
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+            arch: aarch64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust and musl
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+          rustup toolchain install stable --profile minimal --target ${{ matrix.target }}
+          rustup default stable
+      - name: Build
+        env:
+          CC: musl-gcc
+        run: cargo build --release --locked --target ${{ matrix.target }}
+      - name: Pack
+        run: |
+          bin=target/${{ matrix.target }}/release/wa
+          strip "$bin"
+          file "$bin"
+          tar -C "$(dirname "$bin")" -czf wa-${{ matrix.arch }}-linux.tar.gz wa
+          ls -l wa-${{ matrix.arch }}-linux.tar.gz
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wa-${{ matrix.arch }}-linux
+          path: wa-${{ matrix.arch }}-linux.tar.gz
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+      - name: Attach to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 \
+            || gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --title "$TAG" --generate-notes
+          gh release upload "$TAG" wa-*-linux.tar.gz --repo "$GITHUB_REPOSITORY" --clobber

@@ -16,11 +16,13 @@ wa emma         # opens straight into the chat whose name or number contains "em
 wa --demo       # invented chats, with no WhatsApp behind, to try it out
 ```
 
-The script installs for your user only, nothing as root: Rust from rustup into your home folder if `cargo` isn't
-there (or is older than 1.88), then `wa`, built from this repository (a few minutes the first time) into
-`~/.cargo/bin`. It only needs a C compiler already installed, and the same line updates it later. With Rust already
-there, the same is `cargo install --git https://github.com/lucio-ferrao/wassup --locked`; or, from a clone,
-`cargo build --release`, then `target/release/wa`. The dictionaries, the emoji font and the web page are inside the
+The script installs for your user only, nothing as root, and the same line updates it later. On Linux, x86_64 or
+64-bit ARM, it fetches the program already built from the latest release (static, for any distribution) into
+`~/.local/bin` (or `WA_BIN_DIR`), in seconds. Elsewhere, or with `WA_FROM_SOURCE=1`, it builds it: Rust from rustup
+into your home folder if `cargo` isn't there (or is older than 1.88), then `wa` from this repository (a few minutes
+the first time) into `~/.cargo/bin`, which only needs a C compiler. With Rust already there, the same is
+`cargo install --git https://github.com/lucio-ferrao/wassup --locked`; or, from a clone, `cargo build --release`,
+then `target/release/wa`. The dictionaries, the emoji font and the web page are inside the
 program, so the one file is all it needs.
 
 The first time, a QR code appears: on the phone, WhatsApp › Settings › Linked devices › Link a device. The session is
