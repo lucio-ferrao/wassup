@@ -1,6 +1,6 @@
 //! Kitty's graphics protocol as the Node version's image.ts uses it (KittyImages): each picture sent to the terminal once, by
-//! an id of its own, and at each frame only placed over its cells, cut to the part in view; the oldest let go past
-//! sixty. Placing is cheap, so scrolling over pictures sends no pixels.
+//! an id of its own, and at each frame only placed over its cells, cut to the part in view; those placed longest ago let
+//! go past `BUDGET`. Placing is cheap, so scrolling over pictures sends no pixels.
 
 use std::collections::HashMap;
 use std::io::Write;
@@ -8,15 +8,26 @@ use std::io::Write;
 use base64::Engine;
 use image::DynamicImage;
 
+/// Bytes the terminal may hold for the pictures sent, as it keeps them (4 a pixel): under the 64 MiB a Herdr pane
+/// holds, past which it lets go of pictures by itself, those not yet placed again in this frame first, and they'd
+/// stay blank.
+const BUDGET: u64 = 48 * 1024 * 1024;
+
 pub struct Kitty {
     ids: HashMap<String, (u32, u32, u32)>,
+    /// The pictures sent, those placed longest ago first.
     order: Vec<String>,
+    bytes: u64,
     next: u32,
+}
+
+fn size(w: u32, h: u32) -> u64 {
+    w as u64 * h as u64 * 4
 }
 
 impl Kitty {
     pub fn new() -> Self {
-        Self { ids: HashMap::new(), order: vec![], next: 1 }
+        Self { ids: HashMap::new(), order: vec![], bytes: 0, next: 1 }
     }
 
     /// Sends a picture as PNG, at most 800 pixels wide, in chunks; returns its id and the size it was sent at.
@@ -36,9 +47,11 @@ impl Kitty {
         let entry = (id, img.width(), img.height());
         self.ids.insert(key.to_string(), entry);
         self.order.push(key.to_string());
-        if self.order.len() > 60 {
+        self.bytes += size(img.width(), img.height());
+        while self.bytes > BUDGET && self.order.len() > 1 {
             let old = self.order.remove(0);
-            if let Some((old_id, ..)) = self.ids.remove(&old) {
+            if let Some((old_id, w, h)) = self.ids.remove(&old) {
+                self.bytes -= size(w, h);
                 let _ = write!(out, "\x1b_Ga=d,d=I,i={old_id},q=2\x1b\\");
             }
         }
@@ -55,7 +68,14 @@ impl Kitty {
     #[allow(clippy::too_many_arguments)]
     pub fn place(&mut self, out: &mut impl Write, key: &str, img: &DynamicImage, x: u16, y: u16, cols: u16, rows: u16, from: f32, to: f32) {
         let (id, pw, ph) = match self.ids.get(key) {
-            Some(e) => *e,
+            Some(e) => {
+                let e = *e;
+                if let Some(i) = self.order.iter().position(|k| k == key) {
+                    let k = self.order.remove(i);
+                    self.order.push(k);
+                }
+                e
+            }
             None => self.transmit(out, key, img),
         };
         let top = (from * ph as f32).floor() as u32;
@@ -68,5 +88,6 @@ impl Kitty {
         let _ = write!(out, "\x1b_Ga=d,d=A,q=2\x1b\\");
         self.ids.clear();
         self.order.clear();
+        self.bytes = 0;
     }
 }
