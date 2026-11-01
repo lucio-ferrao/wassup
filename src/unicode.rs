@@ -439,7 +439,7 @@ mod tests {
     fn answering(flag: u16, cols: impl Iterator<Item = u16>) -> Answering {
         let mut answer = format!("\x1b[1;{}R", flag + 1);
         for c in cols {
-            answer += &format!("\x1b[1;{}R", c + 1);
+            answer.push_str(&format!("\x1b[1;{}R", c + 1));
         }
         answer += "\x1b[?62;22c";
         Answering { sent: Vec::new(), answer: answer.into_bytes() }

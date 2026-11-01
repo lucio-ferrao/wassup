@@ -422,6 +422,13 @@ pub fn layout(app: &mut App, width: u16, cell: Size) -> Vec<Row> {
         if let Some(p) = kind_piece(app, m) {
             parts.push(Part::In(p));
         }
+        // What was heard in a voice message, dim and slanted: a machine's hearing, not what was written. Nothing
+        // when it heard no word ("...").
+        if let Some(heard) = m.transcript.as_deref().filter(|t| m.kind == "voice" && t.chars().any(char::is_alphabetic)) {
+            for l in markup(&format!("“{heard}”"), wrap_at, Style::new().fg(theme().dim).add_modifier(Modifier::ITALIC)) {
+                parts.push(Part::In(Piece { spans: l.spans, ..Default::default() }));
+            }
+        }
         if m.kind == "location" {
             let lines = markup(&format!("📍 {}", m.text), wrap_at, Style::new().fg(Color::Yellow));
             for l in lines {

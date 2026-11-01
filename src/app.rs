@@ -1483,7 +1483,7 @@ impl App {
         let (value, rest) = match &v {
             GhostView::Fix(f) => {
                 let delta = f.to.chars().count() as i64 - (f.end - f.start) as i64;
-                let value: String = chars[..f.start].iter().collect::<String>() + &f.to + &chars[f.end.min(chars.len())..].iter().collect::<String>();
+                let value: String = chars[..f.start].iter().collect::<String>() + f.to.as_str() + chars[f.end.min(chars.len())..].iter().collect::<String>().as_str();
                 let rest: Vec<Fix> = self
                     .live_fixes()
                     .into_iter()
@@ -1495,7 +1495,7 @@ impl App {
             }
             GhostView::Suffix(_, from, to) | GhostView::Word(from, to) => {
                 let keep = chars.len().saturating_sub(from.chars().count());
-                let value = chars[..keep].iter().collect::<String>() + to;
+                let value = chars[..keep].iter().collect::<String>() + to.as_str();
                 self.cursor = compose::len(&value);
                 (value, self.live_fixes())
             }
@@ -1587,7 +1587,7 @@ impl App {
         if chars.get(fix.start..fix.end).map(|c| c.iter().collect::<String>()) != Some(fix.from.clone()) {
             return;
         }
-        let value: String = chars[..fix.start].iter().collect::<String>() + &fix.to + &chars[fix.end..].iter().collect::<String>();
+        let value: String = chars[..fix.start].iter().collect::<String>() + fix.to.as_str() + chars[fix.end..].iter().collect::<String>().as_str();
         let delta = fix.to.chars().count() as i64 - (fix.end - fix.start) as i64;
         let old = format!("{} {} {text}", m.chat, m.id);
         let rest: Vec<Fix> = self.sent_fixes.get(&old).cloned().flatten().unwrap_or_default().into_iter().filter(|f| *f != fix).map(|f| if f.start >= fix.end { Fix { start: (f.start as i64 + delta) as usize, end: (f.end as i64 + delta) as usize, ..f } } else { f }).collect();

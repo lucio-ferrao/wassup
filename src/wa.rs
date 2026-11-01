@@ -118,12 +118,12 @@ pub fn preview_path(media: &Path, chat: &str, id: &str) -> PathBuf {
     media_dir(media, chat).join(format!("{}.link.jpg", safe(id)))
 }
 
-fn safe(id: &str) -> String {
+pub fn safe(id: &str) -> String {
     id.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' }).collect()
 }
 
 /// The file extension for an attachment: by its type, else its name's, else the type's second half.
-fn ext_for(mime: Option<&str>, name: Option<&str>) -> String {
+pub fn ext_for(mime: Option<&str>, name: Option<&str>) -> String {
     let known = match mime.map(|m| m.split(';').next().unwrap_or(m).trim()) {
         Some("image/jpeg") => Some("jpg"),
         Some("image/png") => Some("png"),
@@ -148,7 +148,7 @@ fn ext_for(mime: Option<&str>, name: Option<&str>) -> String {
     mime.and_then(|m| m.split('/').nth(1)).map(|e| e.split(';').next().unwrap_or(e).to_string()).unwrap_or_else(|| "bin".into())
 }
 
-fn mime_for(ext: &str) -> &'static str {
+pub fn mime_for(ext: &str) -> &'static str {
     match ext {
         "jpg" | "jpeg" => "image/jpeg",
         "png" => "image/png",
@@ -563,6 +563,10 @@ struct Inner {
     relink: UnboundedSender<()>,
     /// Each chat's state as an emoji, worked out calmly by the local model.
     moods: crate::mood::MoodKeeper,
+    /// The Matrix connection, once its session is restored (mx.rs); the chats that are Matrix rooms go to it.
+    mx: std::sync::OnceLock<crate::mx::Mx>,
+    /// Voice messages to read (voice.rs), by chat and id, one at a time.
+    voices: UnboundedSender<(String, String)>,
 }
 
 /// What changes as the connection lives: who's typing, who's online, this device's own presence, what's asked.
@@ -613,6 +617,7 @@ impl Wa {
         let (dl_tx, dl_rx) = unbounded_channel();
         let (pr_tx, pr_rx) = unbounded_channel();
         let (relink_tx, mut relink_rx) = unbounded_channel::<()>();
+        let (voices_tx, voices_rx) = unbounded_channel();
         let moods = crate::mood::MoodKeeper::new(crate::llm::Llm::from_env(crate::llm::Lang::from_env()), Moods { store: store.clone(), tx: tx.clone() });
         let wa = Self {
             inner: Arc::new(Inner {
@@ -627,8 +632,21 @@ impl Wa {
                 profiles: pr_tx,
                 relink: relink_tx,
                 moods,
+                mx: std::sync::OnceLock::new(),
+                voices: voices_tx,
             }),
         };
+        let with_mx = wa.clone();
+        tokio::spawn(async move {
+            let inner = &with_mx.inner;
+            match crate::mx::Mx::start(&inner.dir, inner.store.clone(), inner.tx.clone(), inner.voices.clone()).await {
+                Ok(Some(mx)) => {
+                    let _ = inner.mx.set(mx);
+                }
+                Ok(None) => {}
+                Err(e) => warn!("matrix: {e}"),
+            }
+        });
         let again = wa.clone();
         tokio::spawn(async move {
             while relink_rx.recv().await.is_some() {
@@ -638,6 +656,11 @@ impl Wa {
             }
         });
         tokio::spawn(wa.clone().download_loop(dl_rx));
+        // Those downloaded before they were read on arrival, read now.
+        for v in wa.store().unread_voices() {
+            let _ = wa.inner.voices.send(v);
+        }
+        tokio::spawn(wa.clone().voice_loop(voices_rx));
         tokio::spawn(wa.clone().profile_loop(pr_rx));
         wa.connect().await?;
         Ok(wa)
@@ -670,7 +693,7 @@ impl Wa {
 
     async fn connect(&self) -> Result<()> {
         let session = self.inner.dir.join("session.db");
-        let backend = SqliteStore::new(session.to_str().context("session path")?).await.context("session store")?;
+        let backend = SqliteStore::open(session.to_str().context("session path")?).await.context("session store")?;
         self.set_state(Conn::Connecting, String::new());
         let mut props = whatsapp_rust::wacore::store::DevicePropsOverride::new().with_os("wassup");
         // WA_FULL_HISTORY=1: the phone sends the whole history on linking, not only the recent months.
@@ -731,11 +754,11 @@ impl Wa {
         self.emit(ToUi::Available(available));
         self.inner.moods.start();
         // The groups' names, all at once.
-        match client.groups().get_participating().await {
+        match client.groups().list_participating().await {
             Ok(groups) => {
                 let r = self.store().batch(|db| {
-                    for (jid, meta) in &groups {
-                        Store::touch_chat(db, &jid.to_non_ad_string(), Some(&meta.subject), 0)?;
+                    for group in &groups {
+                        Store::touch_chat(db, &group.id.to_non_ad_string(), group.subject.as_deref(), 0)?;
                     }
                     Ok(())
                 });
@@ -841,12 +864,12 @@ impl Wa {
     fn key_of(&self, m: &Msg) -> wa::MessageKey {
         let chat = if m.key_chat.is_empty() { m.chat.clone() } else { m.key_chat.clone() };
         let sender = if m.key_sender.is_empty() { m.sender.clone() } else { m.key_sender.clone() };
-        wa::MessageKey {
-            remote_jid: Some(chat.clone()),
-            from_me: Some(m.from_me),
-            id: Some(m.id.clone()),
-            participant: (crate::text::is_group(&m.chat) && !m.from_me).then_some(sender),
-        }
+        let mut key = wa::MessageKey::default();
+        key.remote_jid = Some(chat.clone());
+        key.from_me = Some(m.from_me);
+        key.id = Some(m.id.clone());
+        key.participant = (crate::text::is_group(&m.chat) && !m.from_me).then_some(sender);
+        key
     }
 
     fn jid_of(m: &Msg) -> Option<Jid> {
@@ -866,6 +889,15 @@ impl Wa {
 
     fn refuse(&self, key: &str) {
         let _ = self.sink().send(ToUi::Error(s(key)));
+    }
+
+    /// The Matrix connection, for a chat that is a Matrix room; else says there is none.
+    fn mx(&self) -> Option<&crate::mx::Mx> {
+        let mx = self.inner.mx.get();
+        if mx.is_none() {
+            self.refuse("mxOff");
+        }
+        mx
     }
 
     /// The client, when connected; else says so.
@@ -1144,10 +1176,6 @@ impl Wa {
                     self.emit(ToUi::Chats);
                 }
             }
-            Event::PushNameUpdate(p) => {
-                let _ = self.store().batch(|db| Store::set_name(db, &Store::canonical(db, &p.jid.to_non_ad_string()), &p.new_push_name, store::NAME_PUSH));
-                self.emit(ToUi::Chats);
-            }
             Event::SelfPushNameUpdated(p) => {
                 let _ = self.store().set_state("meName", &p.new_name);
                 self.emit(ToUi::Chats);
@@ -1202,7 +1230,7 @@ impl Wa {
             Event::GroupUpdate(g) => {
                 use whatsapp_rust::wacore::stanza::groups::GroupNotificationAction as A;
                 let jid = g.group_jid.to_non_ad_string();
-                if let A::Subject { subject, .. } = &g.action {
+                if let A::Subject { subject, .. } = &*g.action {
                     let _ = self.store().batch(|db| {
                         Store::touch_chat(db, &jid, None, 0)?;
                         Store::set_chat_name(db, &jid, subject)
@@ -1227,10 +1255,10 @@ impl Wa {
                 }
             }
             Event::ChatPresence(p) => {
-                use whatsapp_rust::wacore::types::presence::ChatPresence;
+                use whatsapp_rust::wacore::types::presence::ChatActivity;
                 let chat = self.store().canonical_of(&p.source.chat.to_non_ad_string());
                 let who = self.store().canonical_of(&p.source.sender.to_non_ad_string());
-                let active = matches!(p.state, ChatPresence::Composing);
+                let active = matches!(p.state, ChatActivity::Typing | ChatActivity::RecordingAudio);
                 let me = self.me();
                 self.set_typing(&chat, &who, active && who != me);
                 // Typing, recording and paused are all online.
@@ -1244,7 +1272,7 @@ impl Wa {
                 if jid == self.me() || crate::text::is_group(&jid) {
                     return;
                 }
-                let on = !p.unavailable;
+                let on = p.status == whatsapp_rust::wacore::types::presence::PresenceStatus::Available;
                 // When they were last seen: now while online; going offline, the time WhatsApp gives, or now if they
                 // were online until then.
                 let was = self.inner.live.lock().unwrap().online.get(&jid).copied().unwrap_or(false);
@@ -1352,6 +1380,10 @@ impl Wa {
             self.emit(ToUi::Messages(chat.clone()));
         }
         for (chat, id) in notify {
+            // A voice message that just came is downloaded at once, to be read (voice_loop).
+            if self.row(&chat, &id).is_some_and(|m| m.kind == "voice") {
+                Backend::ensure_media(self, &chat, &id);
+            }
             self.emit(ToUi::Notify(chat, id));
         }
         for (c, id, who, e) in reactions {
@@ -1396,6 +1428,21 @@ impl Wa {
     }
 
     /// The downloads, one at a time: opening an old chat asks for dozens at once, which clogged the connection.
+    /// Voice messages read, one at a time (Voxtype takes the GPU): each once, what was heard kept with it.
+    async fn voice_loop(self, mut rx: UnboundedReceiver<(String, String)>) {
+        while let Some((chat, id)) = rx.recv().await {
+            let Some(m) = self.row(&chat, &id) else { continue };
+            let Some(path) = m.media_path.filter(|_| m.kind == "voice" && m.transcript.is_none()) else { continue };
+            match crate::voice::transcribe(Path::new(&path)).await {
+                Ok(text) => {
+                    let _ = self.store().set_transcript(&chat, &id, &text);
+                    self.emit(ToUi::Messages(chat));
+                }
+                Err(e) => warn!("voice {id}: {e}"),
+            }
+        }
+    }
+
     async fn download_loop(self, mut rx: UnboundedReceiver<Job>) {
         while let Some(job) = rx.recv().await {
             match job {
@@ -1430,7 +1477,7 @@ impl Wa {
                 if let Some(p) = direct_path {
                     m.direct_path = Some(p.to_string());
                 }
-                client.download(&m).await
+                client.download(&m, Default::default()).await.map_err(|e| anyhow!("{e}"))
             }};
         }
         match kind {
@@ -1481,6 +1528,9 @@ impl Wa {
         let file = dir.join(format!("{}.{}", safe(&m.id), ext_for(m.media_mime.as_deref(), m.media_name.as_deref())));
         if std::fs::write(&file, bytes).is_ok() {
             let _ = self.store().set_media(&m.chat, &m.id, &file.to_string_lossy(), m.w, m.h);
+            if m.kind == "voice" {
+                let _ = self.inner.voices.send((m.chat.clone(), m.id.clone()));
+            }
         }
     }
 
@@ -1493,17 +1543,16 @@ impl Wa {
         {
             if let (Some(key), Some(jid)) = (Self::media_key(&m.kind, &media), Self::jid_of(&m)) {
                 let participant = (crate::text::is_group(&m.chat) && !m.from_me).then(|| m.key_sender.parse::<Jid>().ok()).flatten();
-                let req = whatsapp_rust::MediaReuploadRequest {
-                    msg_id: &m.id,
-                    chat_jid: &jid,
-                    media_key: &key,
-                    is_from_me: m.from_me,
-                    participant: participant.as_ref(),
-                };
-                got = match client.media_reupload().request(&req).await {
-                    Ok(whatsapp_rust::MediaRetryResult::Success { direct_path }) => Self::fetch_media(&client, &m.kind, &media, Some(&direct_path)).await,
-                    Ok(other) => Err(anyhow!("{other:?}")),
-                    Err(e) => Err(anyhow!("{e}")),
+                let target = whatsapp_rust::MessageId::new(&m.id).and_then(|id| whatsapp_rust::MessageRef::new(&jid, id, participant.as_ref(), m.from_me));
+                let key: Option<&[u8; 32]> = key.as_slice().try_into().ok();
+                got = match (target, key) {
+                    (Ok(target), Some(media_key)) => match client.media_reupload().request(&whatsapp_rust::MediaReuploadRequest { target, media_key }).await {
+                        Ok(whatsapp_rust::MediaRetryResult::Success { direct_path }) => Self::fetch_media(&client, &m.kind, &media, Some(&direct_path)).await,
+                        Ok(other) => Err(anyhow!("{other:?}")),
+                        Err(e) => Err(anyhow!("{e}")),
+                    },
+                    (Err(e), _) => Err(anyhow!("{e}")),
+                    (_, None) => Err(anyhow!("media key not 32 bytes")),
                 };
             }
         }
@@ -1525,8 +1574,11 @@ impl Wa {
         let mut bytes: Option<Vec<u8>> = None;
         if let (Some(x), Some(client)) = (&x, self.client())
             && let (Some(path), Some(key), Some(sha), Some(enc)) = (&x.thumbnail_direct_path, &x.media_key, &x.thumbnail_sha256, &x.thumbnail_enc_sha256) {
-                let params = whatsapp_rust::download::DownloadParams::encrypted(path.clone(), key, sha, enc, 0, whatsapp_rust::download::MediaType::LinkThumbnail);
-                match client.download_from_params(&params).await {
+                let got = match whatsapp_rust::download::DownloadParams::encrypted(path.clone(), key, sha, enc, 0, whatsapp_rust::download::MediaType::LinkThumbnail) {
+                    Ok(params) => client.download(&params, Default::default()).await.map_err(|e| anyhow!("{e}")),
+                    Err(e) => Err(anyhow!("{e}")),
+                };
+                match got {
                     Ok(b) if !b.is_empty() => bytes = Some(b),
                     Ok(_) => {}
                     Err(e) => warn!("link preview {id}: {e}"),
@@ -1563,7 +1615,7 @@ impl Wa {
         let fetched = chrono::Utc::now().timestamp();
         let mut p = store::Profile { fetched, ..Default::default() };
         if crate::text::is_group(jid) {
-            if let Ok(meta) = client.groups().get_metadata(&who).await {
+            if let Ok(meta) = client.groups().fetch_metadata(&who).await {
                 p.members = Some(meta.participants.len() as u32);
             }
         } else if let Ok(info) = client.contacts().get_user_info(std::slice::from_ref(&who)).await
@@ -1571,7 +1623,9 @@ impl Wa {
                 p.about = u.status.clone().map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
                 let _ = self.store().set_state(&format!("biz:{jid}"), if u.is_business { "true" } else { "false" });
             }
-        if let Ok(Some(pic)) = client.contacts().get_profile_picture(&who, false).await {
+        let target = if crate::text::is_group(jid) { whatsapp_rust::ProfilePictureTarget::Group(&who) } else { whatsapp_rust::ProfilePictureTarget::Contact(&who) };
+        let request = whatsapp_rust::ProfilePictureRequest::new(target, whatsapp_rust::ProfilePictureType::Full);
+        if let Ok(Some(pic)) = client.pictures().lookup(request).await.map(|l| l.into_found()) {
             let dir = media_dir(&self.inner.media, jid);
             let _ = std::fs::create_dir_all(&dir);
             let path = dir.join("profile.jpg");
@@ -1631,6 +1685,12 @@ impl Wa {
 
 impl Backend for Wa {
     fn send(&self, chat: &str, text: &str, reply_to: Option<&str>, mentions: &[String]) {
+        if crate::mx::is_matrix(chat) {
+            if let Some(mx) = self.mx() {
+                mx.send(chat, text, reply_to);
+            }
+            return;
+        }
         let Some(client) = self.with_client() else { return };
         let reply = reply_to.and_then(|id| self.row(chat, id));
         let message = self.compose(text, reply.as_ref(), mentions);
@@ -1639,8 +1699,8 @@ impl Backend for Wa {
             let Ok(jid) = chat.parse::<Jid>() else { return };
             match client.send_message(jid, message.clone()).await {
                 Ok(sent) => {
-                    wa.keep_sent(&chat, &sent.message_id.to_string(), &message);
-                    let _ = wa.store().batch(|db| Store::set_status(db, &chat, &sent.message_id.to_string(), 2));
+                    wa.keep_sent(&chat, sent.message_id.as_ref(), &message);
+                    let _ = wa.store().batch(|db| Store::set_status(db, &chat, sent.message_id.as_ref(), 2));
                 }
                 Err(e) => Self::fail_to(&sink, "send", e),
             }
@@ -1648,13 +1708,19 @@ impl Backend for Wa {
     }
 
     fn react(&self, chat: &str, id: &str, emoji: &str) {
+        if crate::mx::is_matrix(chat) {
+            if let Some(mx) = self.mx() {
+                mx.react(chat, id, emoji);
+            }
+            return;
+        }
         let Some(m) = self.row(chat, id) else { return self.refuse("unknownMessage") };
         let Some(client) = self.with_client() else { return };
         let key = self.key_of(&m);
         let (wa, chat, id, emoji, sink) = (self.clone(), chat.to_string(), id.to_string(), emoji.to_string(), self.sink());
         tokio::spawn(async move {
             let Some(jid) = Self::jid_of(&m) else { return };
-            match client.send_reaction(jid, key, &emoji).await {
+            match client.send_reaction_raw(jid, key, &emoji).await {
                 Ok(_) => {
                     let ts = chrono::Utc::now().timestamp_millis();
                     let _ = wa.store().batch(|db| Store::set_reaction(db, &chat, &id, "me", &emoji, ts));
@@ -1668,11 +1734,17 @@ impl Backend for Wa {
 
     fn edit(&self, chat: &str, id: &str, text: &str) {
         let Some(m) = self.row(chat, id).filter(|m| m.from_me) else { return self.refuse("onlyOwnEdit") };
+        if crate::mx::is_matrix(chat) {
+            if let Some(mx) = self.mx() {
+                mx.edit(chat, id, text);
+            }
+            return;
+        }
         let Some(client) = self.with_client() else { return };
         let (wa, chat, id, text, sink) = (self.clone(), chat.to_string(), id.to_string(), text.to_string(), self.sink());
         tokio::spawn(async move {
             let Some(jid) = Self::jid_of(&m) else { return };
-            match client.edit_message(jid, id.clone(), wa::Message::text(text.clone())).await {
+            match client.edit_message_raw(jid, id.clone(), wa::Message::text(text.clone()), Default::default()).await {
                 Ok(_) => {
                     let _ = wa.store().batch(|db| Store::edit(db, &chat, &id, "text", &text));
                     wa.emit(ToUi::Messages(chat));
@@ -1688,23 +1760,30 @@ impl Backend for Wa {
         if for_everyone && !m.from_me {
             return self.refuse("onlyOwnDelete");
         }
+        if crate::mx::is_matrix(chat) {
+            if let Some(mx) = self.mx() {
+                mx.delete(chat, id, for_everyone);
+            }
+            return;
+        }
         let Some(client) = self.with_client() else { return };
         let (wa, sink) = (self.clone(), self.sink());
         tokio::spawn(async move {
             let Some(jid) = Self::jid_of(&m) else { return };
             let done = if for_everyone {
                 client
-                    .revoke_message(jid, m.id.clone(), whatsapp_rust::send::RevokeType::Sender)
+                    .revoke_message_raw(jid, m.id.clone(), whatsapp_rust::send::RevokeType::Sender)
                     .await
                     .map_err(|e| e.to_string())
                     .and_then(|_| wa.store().batch(|db| Store::revoke(db, &m.chat, &m.id)).map_err(|e| e.to_string()))
             } else {
                 let sender = (crate::text::is_group(&m.chat) && !m.from_me).then(|| m.key_sender.parse::<Jid>().ok()).flatten();
-                client
-                    .chat_actions()
-                    .delete_message_for_me(&jid, sender.as_ref(), &m.id, m.from_me, false, Some(m.ts))
-                    .await
-                    .map_err(|e| e.to_string())
+                let target = whatsapp_rust::MessageId::new(&m.id).and_then(|id| whatsapp_rust::MessageRef::new(&jid, id, sender.as_ref(), m.from_me)).map_err(|e| e.to_string());
+                let done = match target {
+                    Ok(target) => client.chat_actions().delete_message_for_me(&target, false, Some(m.ts)).await.map_err(|e| e.to_string()),
+                    Err(e) => Err(e),
+                };
+                done
                     .and_then(|_| wa.store().batch(|db| Store::forget(db, &m.chat, &m.id)).map_err(|e| e.to_string()))
             };
             match done {
@@ -1721,6 +1800,16 @@ impl Backend for Wa {
     /// request's id, and only what lands before the old anchor counts. Unanswered in 30 s, it can be asked again.
     fn fetch_older(&self, chat: &str) {
         let sink = self.sink();
+        if crate::mx::is_matrix(chat) {
+            match self.inner.mx.get() {
+                Some(mx) => mx.fetch_older(chat, sink),
+                None => {
+                    let _ = sink.send(ToUi::Error(s("mxOff")));
+                    let _ = sink.send(ToUi::Older(chat.to_string(), None));
+                }
+            }
+            return;
+        }
         let Some(client) = self.client().filter(|_| self.is_open()) else {
             let _ = sink.send(ToUi::Error(s("notConnectedYet")));
             let _ = sink.send(ToUi::Older(chat.to_string(), None));
@@ -1756,6 +1845,12 @@ impl Backend for Wa {
         if rows.is_empty() {
             return;
         }
+        if crate::mx::is_matrix(chat) {
+            if let Some(mx) = self.inner.mx.get() {
+                mx.mark_read(chat, &rows);
+            }
+            return;
+        }
         let Some(client) = self.client().filter(|_| self.is_open()) else { return };
         tokio::spawn(async move {
             // By chat and sender as WhatsApp named them.
@@ -1782,6 +1877,12 @@ impl Backend for Wa {
     }
 
     fn ensure_media(&self, chat: &str, id: &str) {
+        if crate::mx::is_matrix_id(chat) {
+            if let Some(mx) = self.inner.mx.get() {
+                mx.ensure_media(chat, id);
+            }
+            return;
+        }
         let key = format!("{chat}/{id}");
         if self.client().is_none() || !self.inner.live.lock().unwrap().downloading.insert(key) {
             return;
@@ -1790,6 +1891,9 @@ impl Backend for Wa {
     }
 
     fn ensure_preview(&self, chat: &str, id: &str) {
+        if crate::mx::is_matrix_id(chat) {
+            return;
+        }
         let file = preview_path(&self.inner.media, chat, id);
         if file.exists() || file.with_extension("jpg.none").exists() || self.client().is_none() {
             return;
@@ -1801,6 +1905,9 @@ impl Backend for Wa {
     }
 
     fn ensure_profile(&self, jid: &str) {
+        if crate::mx::is_matrix_id(jid) {
+            return;
+        }
         if self.store().profile(jid).is_some_and(|p| chrono::Utc::now().timestamp() - p.fetched < 86400) {
             return;
         }
@@ -1810,6 +1917,9 @@ impl Backend for Wa {
     }
 
     fn ensure_name(&self, jid: &str) {
+        if crate::mx::is_matrix_id(jid) {
+            return;
+        }
         if crate::text::is_group(jid) || self.store().has_name(jid) {
             return;
         }
@@ -1830,6 +1940,12 @@ impl Backend for Wa {
     }
 
     fn set_composing(&self, chat: &str, on: bool) {
+        if crate::mx::is_matrix_id(chat) {
+            if let Some(mx) = self.inner.mx.get() {
+                mx.set_typing(chat, on);
+            }
+            return;
+        }
         // While I write, the local model is left to the writing suggestions.
         if on {
             self.inner.moods.writing();
@@ -1845,6 +1961,9 @@ impl Backend for Wa {
     }
 
     fn subscribe_presence(&self, chat: &str) {
+        if crate::mx::is_matrix_id(chat) {
+            return;
+        }
         let me = self.me();
         let (known, members) = {
             let mut live = self.inner.live.lock().unwrap();
@@ -1910,6 +2029,12 @@ impl Backend for Wa {
     }
 
     fn send_file(&self, chat: &str, path: &str, caption: &str) {
+        if crate::mx::is_matrix(chat) {
+            if let Some(mx) = self.mx() {
+                mx.send_file(chat, path, caption);
+            }
+            return;
+        }
         let Some(client) = self.with_client() else { return };
         let (wa, chat, path, caption, sink) = (self.clone(), chat.to_string(), PathBuf::from(path), caption.to_string(), self.sink());
         tokio::spawn(async move {
@@ -1936,43 +2061,43 @@ impl Backend for Wa {
                     _ => (None, None, None),
                 };
                 let seconds = if media_type == MediaType::Audio { audio_seconds(&path, &data) } else { None };
-                let message = match media_type {
-                    MediaType::Image => wa::Message {
-                        image_message: whatsapp_rust::waproto::buffa::MessageField::some(wa::message::ImageMessage {
-                            url: Some(up.url.clone()), direct_path: Some(up.direct_path.clone()), media_key: Some(up.media_key.to_vec()),
-                            file_sha256: Some(up.file_sha256.to_vec()), file_enc_sha256: Some(up.file_enc_sha256.to_vec()),
-                            file_length: Some(up.file_length), mimetype: Some(mime.clone()), caption,
-                            jpeg_thumbnail: thumb.clone(), width: w, height: h, ..Default::default()
-                        }),
-                        ..Default::default()
-                    },
-                    MediaType::Video => wa::Message {
-                        video_message: whatsapp_rust::waproto::buffa::MessageField::some(wa::message::VideoMessage {
-                            url: Some(up.url.clone()), direct_path: Some(up.direct_path.clone()), media_key: Some(up.media_key.to_vec()),
-                            file_sha256: Some(up.file_sha256.to_vec()), file_enc_sha256: Some(up.file_enc_sha256.to_vec()),
-                            file_length: Some(up.file_length), mimetype: Some(mime.clone()), caption, jpeg_thumbnail: thumb.clone(),
-                            ..Default::default()
-                        }),
-                        ..Default::default()
-                    },
-                    MediaType::Audio => wa::Message {
-                        audio_message: whatsapp_rust::waproto::buffa::MessageField::some(wa::message::AudioMessage {
-                            url: Some(up.url.clone()), direct_path: Some(up.direct_path.clone()), media_key: Some(up.media_key.to_vec()),
-                            file_sha256: Some(up.file_sha256.to_vec()), file_enc_sha256: Some(up.file_enc_sha256.to_vec()),
-                            file_length: Some(up.file_length), mimetype: Some(mime.clone()), seconds, ..Default::default()
-                        }),
-                        ..Default::default()
-                    },
-                    _ => wa::Message {
-                        document_message: whatsapp_rust::waproto::buffa::MessageField::some(wa::message::DocumentMessage {
-                            url: Some(up.url.clone()), direct_path: Some(up.direct_path.clone()), media_key: Some(up.media_key.to_vec()),
-                            file_sha256: Some(up.file_sha256.to_vec()), file_enc_sha256: Some(up.file_enc_sha256.to_vec()),
-                            file_length: Some(up.file_length), mimetype: Some(mime.clone()), file_name: Some(name.clone()), caption,
-                            ..Default::default()
-                        }),
-                        ..Default::default()
-                    },
-                };
+                // The four kinds share what the upload gave; each is then the message's one field.
+                macro_rules! uploaded {
+                    ($kind:ty) => {{
+                        let mut a = <$kind>::default();
+                        a.url = Some(up.url.clone());
+                        a.direct_path = Some(up.direct_path.clone());
+                        a.media_key = Some(up.media_key.to_vec());
+                        a.file_sha256 = Some(up.file_sha256.to_vec());
+                        a.file_enc_sha256 = Some(up.file_enc_sha256.to_vec());
+                        a.file_length = Some(up.file_length);
+                        a.mimetype = Some(mime.clone());
+                        a
+                    }};
+                }
+                let mut message = wa::Message::default();
+                match media_type {
+                    MediaType::Image => {
+                        let mut a = uploaded!(wa::message::ImageMessage);
+                        (a.caption, a.jpeg_thumbnail, a.width, a.height) = (caption, thumb.clone(), w, h);
+                        message.image_message = whatsapp_rust::waproto::buffa::MessageField::some(a);
+                    }
+                    MediaType::Video => {
+                        let mut a = uploaded!(wa::message::VideoMessage);
+                        (a.caption, a.jpeg_thumbnail) = (caption, thumb.clone());
+                        message.video_message = whatsapp_rust::waproto::buffa::MessageField::some(a);
+                    }
+                    MediaType::Audio => {
+                        let mut a = uploaded!(wa::message::AudioMessage);
+                        a.seconds = seconds;
+                        message.audio_message = whatsapp_rust::waproto::buffa::MessageField::some(a);
+                    }
+                    _ => {
+                        let mut a = uploaded!(wa::message::DocumentMessage);
+                        (a.file_name, a.caption) = (Some(name.clone()), caption);
+                        message.document_message = whatsapp_rust::waproto::buffa::MessageField::some(a);
+                    }
+                }
                 let sent = client.send_message(jid, message.clone()).await?;
                 let id = sent.message_id.to_string();
                 wa.keep_sent(&chat, &id, &message);
@@ -1992,6 +2117,9 @@ impl Backend for Wa {
     }
 
     fn download_all(&self, chat: &str) {
+        if crate::mx::is_matrix(chat) {
+            return self.refuse("mxNotYet");
+        }
         let name: String = self.store().name_of(chat).chars().map(|c| if c.is_alphanumeric() || " _.-".contains(c) { c } else { '_' }).collect();
         let out = PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join("Downloads/wa").join(name);
         if let Err(e) = std::fs::create_dir_all(&out) {

@@ -566,6 +566,10 @@ pub fn phone_number(jid: &str, me: &str) -> String {
 /// it has when `members` says; for a person, their number as `phone_number` gives it. A hidden number ("@lid") has
 /// none to show: pass the phone number's jid it stands for, when known, instead.
 pub fn chat_number(jid: &str, me: &str, members: Option<usize>, lang: Lang) -> String {
+    // A Matrix room says so, where a WhatsApp chat has its number.
+    if crate::mx::is_matrix(jid) {
+        return if crate::mx::is_group(jid) { format!("Matrix · {}", say(lang, "grupo", "group")) } else { "Matrix".into() };
+    }
     if jid.ends_with("@g.us") {
         return match members {
             Some(n) => format!("{} · {n} {}", say(lang, "grupo", "group"), say(lang, "membros", "members")),

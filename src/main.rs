@@ -3,6 +3,9 @@
 //! that chat alone; `--demo` shows invented chats with no WhatsApp behind; `--web` serves it to a browser (web.rs).
 //! The first one started keeps the connection; those started after it in other terminals share it (ipc.rs).
 
+// matrix-sdk's futures nest deeper than the compiler's default limit allows it to check (as its documentation says).
+#![recursion_limit = "256"]
+
 mod app;
 mod bigtext;
 mod chat;
@@ -20,12 +23,14 @@ mod links;
 mod list;
 mod llm;
 mod mood;
+mod mx;
 mod spell;
 mod store;
 mod term;
 mod text;
 mod ui;
 mod unicode;
+mod voice;
 mod wa;
 mod web;
 mod webtab;
@@ -139,6 +144,12 @@ fn main() -> Result<()> {
     let demo = args.iter().any(|a| a == "--demo");
     if args.first().is_some_and(|a| a == "--web" || a == "--web-tab") {
         return web::main(&args);
+    }
+    // `wa matrix login`: the Matrix session, asked in this terminal (mx.rs).
+    if args.len() == 2 && args[0] == "matrix" && args[1] == "login" {
+        let dir = data_dir(None);
+        setup(&dir)?;
+        return tokio::runtime::Builder::new_multi_thread().enable_all().build()?.block_on(mx::login(&dir));
     }
     // `wa ana maria`: every word not an option, together.
     let words: Vec<&str> = args.iter().filter(|a| !a.starts_with("--")).map(String::as_str).collect();

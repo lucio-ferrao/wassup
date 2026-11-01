@@ -12,12 +12,17 @@ path = "src/main.rs"
 
 [dependencies]
 # Without "simd", which needs a nightly compiler.
-whatsapp-rust = { version = "0.7", default-features = false, features = ["sqlite-storage", "tokio-transport", "tokio-runtime", "ureq-client", "tokio-native", "signal"] }
+whatsapp-rust = { git = "https://github.com/jlucaso1/whatsapp-rust", rev = "0d1373a8f06e0dfa72f3ea1c4c33abae9fd21d61", default-features = false, features = ["sqlite-storage", "sqlite-storage-bundled", "tokio-transport", "tokio-runtime", "ureq-client", "tokio-native", "signal"] }
+# Matrix (mx.rs): sync, end-to-end encryption and its SQLite stores; TLS through the ring provider installed at
+# start, as the rest, not aws-lc.
+matrix-sdk = { version = "0.19", default-features = false, features = ["e2e-encryption", "automatic-room-key-forwarding", "sqlite"] }
+# The type of a Matrix attachment, as matrix-sdk takes it.
+mime = "0.3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time", "net", "io-util", "fs", "signal", "process"] }
 ratatui = "0.30"
 ratatui-image = { version = "11.1", default-features = false, features = ["image-defaults", "crossterm"] }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "gif"] }
-rusqlite = { version = "0.39", features = ["functions"] }
+rusqlite = { version = "0.40", features = ["functions"] }
 qrcode = { version = "0.14", default-features = false }
 unicode-width = "0.2"
 unicode-segmentation = "1"

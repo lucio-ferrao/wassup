@@ -119,7 +119,7 @@ pub fn number_of(jid: &str) -> String {
 }
 
 pub fn is_group(jid: &str) -> bool {
-    jid.ends_with("@g.us")
+    jid.ends_with("@g.us") || crate::mx::is_group(jid)
 }
 
 /// Two initials from a name's words, "de", "da"… left out, as wassup's; "#" without any.

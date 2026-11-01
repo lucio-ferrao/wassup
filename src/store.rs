@@ -51,6 +51,8 @@ pub struct Msg {
     pub key_sender: String,
     /// A text with a link whose preview carries a picture.
     pub preview: bool,
+    /// What was heard in a voice message (voice.rs), once it's been through; empty when nothing was.
+    pub transcript: Option<String>,
 }
 
 /// A chat as the list draws it.
@@ -104,7 +106,7 @@ fn abs(path: Option<String>) -> Option<String> {
     path.map(|p| crate::config_dir().join("media").join(p).to_string_lossy().into_owned())
 }
 
-const MSG_COLS: &str = "chat, id, from_me, sender, push_name, ts, kind, text, thumb, media, media_path, w, h, status, quoted, media_mime, media_name, media_err, key_chat, key_sender, preview";
+const MSG_COLS: &str = "chat, id, from_me, sender, push_name, ts, kind, text, thumb, media, media_path, w, h, status, quoted, media_mime, media_name, media_err, key_chat, key_sender, preview, transcript";
 
 fn msg_row(r: &rusqlite::Row) -> rusqlite::Result<Msg> {
     Ok(Msg {
@@ -129,6 +131,7 @@ fn msg_row(r: &rusqlite::Row) -> rusqlite::Result<Msg> {
         key_chat: r.get(18)?,
         key_sender: r.get(19)?,
         preview: r.get(20)?,
+        transcript: r.get(21)?,
         raw: None,
     })
 }
@@ -176,6 +179,7 @@ impl Store {
             "messages ADD COLUMN media_name TEXT",
             "messages ADD COLUMN media_err INTEGER NOT NULL DEFAULT 0",
             "messages ADD COLUMN preview INTEGER NOT NULL DEFAULT 0",
+            "messages ADD COLUMN transcript TEXT",
             "reactions ADD COLUMN ts INTEGER NOT NULL DEFAULT 0",
             "avatars ADD COLUMN about TEXT",
             "avatars ADD COLUMN members INTEGER",
@@ -511,6 +515,19 @@ impl Store {
         Ok(())
     }
 
+    /// The voice messages here and not yet read: their chat and id.
+    pub fn unread_voices(&self) -> Vec<(String, String)> {
+        let db = self.db.lock().unwrap();
+        let Ok(mut q) = db.prepare("SELECT chat, id FROM messages WHERE kind = 'voice' AND media_path IS NOT NULL AND transcript IS NULL") else { return vec![] };
+        q.query_map([], |r| Ok((r.get(0)?, r.get(1)?))).map(|rows| rows.flatten().collect()).unwrap_or_default()
+    }
+
+    /// What was heard in a voice message, kept so it's never asked again.
+    pub fn set_transcript(&self, chat: &str, id: &str, text: &str) -> Result<()> {
+        self.db.lock().unwrap().execute("UPDATE messages SET transcript = ?3 WHERE chat = ?1 AND id = ?2", params![chat, id, text])?;
+        Ok(())
+    }
+
     pub fn set_media_err(&self, chat: &str, id: &str) -> Result<()> {
         self.db.lock().unwrap().execute("UPDATE messages SET media_err = 1 WHERE chat = ?1 AND id = ?2", params![chat, id])?;
         Ok(())
@@ -648,13 +665,13 @@ impl Store {
         let mut args: Vec<String> = Vec::new();
         if let Some(c) = chat {
             args.push(c.to_string());
-            sql += &format!(" AND chat = ?{}", args.len());
+            sql.push_str(&format!(" AND chat = ?{}", args.len()));
         }
         for w in words {
             args.push(format!("%{}%", w.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")));
-            sql += &format!(" AND fold(text) LIKE ?{} ESCAPE '\\'", args.len());
+            sql.push_str(&format!(" AND fold(text) LIKE ?{} ESCAPE '\\'", args.len()));
         }
-        sql += &format!(" ORDER BY ts DESC LIMIT {limit}) ORDER BY ts ASC");
+        sql.push_str(&format!(" ORDER BY ts DESC LIMIT {limit}) ORDER BY ts ASC"));
         let mut q = db.prepare(&sql)?;
         let rows = q.query_map(rusqlite::params_from_iter(args.iter()), msg_row)?;
         Ok(rows.collect::<Result<_, _>>()?)
