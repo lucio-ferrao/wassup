@@ -515,6 +515,19 @@ impl Store {
         Ok(())
     }
 
+    /// A message's small picture, had after it (a Matrix video's).
+    pub fn set_thumb(&self, chat: &str, id: &str, thumb: &[u8]) -> Result<()> {
+        self.db.lock().unwrap().execute("UPDATE messages SET thumb = ?3 WHERE chat = ?1 AND id = ?2", params![chat, id, thumb])?;
+        Ok(())
+    }
+
+    /// The voice messages with an attachment to download that isn't here, nor known not to be had.
+    pub fn undownloaded_voices(&self) -> Vec<(String, String)> {
+        let db = self.db.lock().unwrap();
+        let Ok(mut q) = db.prepare("SELECT chat, id FROM messages WHERE kind = 'voice' AND media IS NOT NULL AND media_path IS NULL AND media_err = 0") else { return vec![] };
+        q.query_map([], |r| Ok((r.get(0)?, r.get(1)?))).map(|rows| rows.flatten().collect()).unwrap_or_default()
+    }
+
     /// The voice messages here and not yet read: their chat and id.
     pub fn unread_voices(&self) -> Vec<(String, String)> {
         let db = self.db.lock().unwrap();

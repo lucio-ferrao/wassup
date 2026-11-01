@@ -770,6 +770,7 @@ impl Wa {
             Err(e) => warn!("groups: {e}"),
         }
         self.resolve_lids(&client).await;
+        self.fetch_voices();
         // What was asked while it was down is asked now.
         let subscribed: Vec<String> = self.inner.live.lock().unwrap().subscribed.iter().cloned().collect();
         if available {
@@ -1151,6 +1152,7 @@ impl Wa {
                     }
                 };
                 info!("history: {} conversations, {stored} messages", hs.conversations.len());
+                self.fetch_voices();
                 self.emit(ToUi::Chats);
                 self.emit(ToUi::Messages("*".into()));
                 if let Some((chat, oldest_ts, before, sink)) = asked {
@@ -1428,6 +1430,16 @@ impl Wa {
     }
 
     /// The downloads, one at a time: opening an old chat asks for dozens at once, which clogged the connection.
+    /// Every WhatsApp voice message kept and not downloaded yet (nor found not to be had), downloaded, to be read:
+    /// those of the history too, not only those that come. Matrix's are mx.rs's, as they're kept and on its start.
+    fn fetch_voices(&self) {
+        for (chat, id) in self.store().undownloaded_voices() {
+            if !crate::mx::is_matrix(&chat) {
+                Backend::ensure_media(self, &chat, &id);
+            }
+        }
+    }
+
     /// Voice messages read, one at a time (Voxtype takes the GPU): each once, what was heard kept with it.
     async fn voice_loop(self, mut rx: UnboundedReceiver<(String, String)>) {
         while let Some((chat, id)) = rx.recv().await {

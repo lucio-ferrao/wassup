@@ -231,6 +231,12 @@ impl Mx {
             }
             self.read_so_far(&room, &chat).await;
         }
+        // Voice messages kept before and not downloaded (as they come in are), downloaded now, to be read.
+        for (chat, id) in self.inner.store.undownloaded_voices() {
+            if is_matrix(&chat) {
+                self.ensure_media(&chat, &id);
+            }
+        }
         self.emit(ToUi::Chats);
     }
 
@@ -352,12 +358,42 @@ impl Mx {
             Ok(Some(added.then(|| m.id.clone())))
         });
         match r {
-            Ok(new) => Some((chat, new.flatten())),
+            Ok(new) => {
+                self.ensure_thumb(&chat, ev);
+                // A voice message is downloaded as it's kept, from the history too, to be read.
+                if matches!(ev.content.msgtype, MessageType::Audio(ref a) if a.voice.is_some()) {
+                    self.ensure_media(&chat, ev.event_id.as_str());
+                }
+                Some((chat, new.flatten()))
+            }
             Err(e) => {
                 warn!("matrix message: {e}");
                 None
             }
         }
+    }
+
+    /// A video's small picture, which Matrix sends apart (WhatsApp's comes inside the message): downloaded, and kept
+    /// as the message's, for the screen to show before the video is.
+    fn ensure_thumb(&self, chat: &str, ev: &OriginalSyncRoomMessageEvent) {
+        let MessageType::Video(c) = &ev.content.msgtype else { return };
+        let Some(source) = c.info.as_ref().and_then(|i| i.thumbnail_source.clone()) else { return };
+        let id = ev.event_id.to_string();
+        if self.inner.store.message(chat, &id).is_none_or(|m| m.thumb.is_some()) {
+            return;
+        }
+        let (mx, chat) = (self.clone(), chat.to_string());
+        tokio::spawn(async move {
+            let request = MediaRequestParameters { source, format: MediaFormat::File };
+            match mx.inner.client.media().get_media_content(&request, true).await {
+                Ok(bytes) => {
+                    if mx.inner.store.set_thumb(&chat, &id, &bytes).is_ok() {
+                        mx.emit(ToUi::Messages(chat));
+                    }
+                }
+                Err(e) => warn!("matrix video picture {id}: {e}"),
+            }
+        });
     }
 
     /// A reaction to a message: one per person and message, as the store keeps them (the latest wins). Which
@@ -405,10 +441,6 @@ impl Mx {
         let Some((chat, new)) = self.keep(room, ev, false).await else { return };
         self.emit(ToUi::Messages(chat.clone()));
         if let Some(id) = new {
-            // A voice message that just came is downloaded at once, to be read.
-            if self.inner.store.message(&chat, &id).is_some_and(|m| m.kind == "voice") {
-                self.ensure_media(&chat, &id);
-            }
             self.emit(ToUi::Notify(chat, id));
         }
         self.emit(ToUi::Chats);
