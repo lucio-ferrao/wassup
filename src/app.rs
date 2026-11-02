@@ -1044,6 +1044,11 @@ impl App {
             self.select(Some(ids[next.max(0) as usize].clone()));
             self.keep_selected_in_view = true;
         }
+        // With something written, the selected message is the one it answers; back in the band, it answers none.
+        if !self.input.is_empty() && self.editing.is_none() {
+            self.reply_to = self.selected.clone();
+            self.react_to = None;
+        }
     }
 
     /// Selects a message of the open chat and brings it into view, drawing back as far as it.
@@ -2421,7 +2426,19 @@ impl App {
                 let id = self.selected.clone().unwrap_or_default();
                 self.edit_message(&id);
             }
-            // Typing over the selected message answers it; ":" reacts to it, and stays typed for the emoji's code.
+            // Typing over the selected message answers it; ":" reacts to it, and stays typed for the emoji's code. With
+            // something already written, the answer goes on from it.
+            KeyCode::Char(c) if !ctrl && self.selected.is_some() && !self.input.is_empty() && self.editing.is_none() => {
+                self.reply_to = self.selected.clone();
+                self.react_to = None;
+                (self.input, self.cursor) = compose::edit(&self.input, self.cursor, Edit::Insert(c.to_string()));
+                self.accepted = None;
+                self.promote_active();
+                self.note_writing();
+                self.set_focus(Focus::Input);
+                self.note_composing();
+                self.update_suggestions(150);
+            }
             KeyCode::Char(c) if !ctrl && self.selected.is_some() => {
                 let sel = self.selected.clone();
                 if c == ':' {
