@@ -24,6 +24,7 @@ mod list;
 mod llm;
 mod mood;
 mod mx;
+mod mximport;
 mod spell;
 mod store;
 mod term;
@@ -145,11 +146,17 @@ fn main() -> Result<()> {
     if args.first().is_some_and(|a| a == "--web" || a == "--web-tab") {
         return web::main(&args);
     }
-    // `wa matrix login`: the Matrix session, asked in this terminal (mx.rs).
+    // `wa matrix login`: the Matrix session, asked in this terminal (mx.rs); `wa matrix import-mine <chat> <from> <to>`:
+    // my messages of a chat into a Matrix room of mine, in my name and at their times (mximport.rs).
     if args.len() == 2 && args[0] == "matrix" && args[1] == "login" {
         let dir = data_dir(None);
         setup(&dir)?;
         return tokio::runtime::Builder::new_multi_thread().enable_all().build()?.block_on(mx::login(&dir));
+    }
+    if args.len() == 5 && args[0] == "matrix" && args[1] == "import-mine" {
+        let dir = data_dir(None);
+        setup(&dir)?;
+        return tokio::runtime::Builder::new_multi_thread().enable_all().build()?.block_on(mximport::import_mine(&dir, &args[2], &args[3], &args[4]));
     }
     // `wa ana maria`: every word not an option, together.
     let words: Vec<&str> = args.iter().filter(|a| !a.starts_with("--")).map(String::as_str).collect();
