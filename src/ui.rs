@@ -551,10 +551,10 @@ fn draw_tabs(f: &mut Frame, app: &mut App, bar: Rect) {
         let mark_style = if closing { Style::new().bg(bg).fg(theme().dim) } else { Style::new().bg(bg) };
         let spans = vec![Span::styled(" ", Style::new().bg(bg)), Span::styled(name.clone(), style), Span::styled(mark.clone(), mark_style), Span::styled(" ", Style::new().bg(bg))];
         f.render_widget(Paragraph::new(Line::from(spans)), Rect { x, width: w, ..bar });
+        app.hits.push((x, bar.y, w, Hit::Tab(i)));
         if closing {
             app.hits.push((x + 2 + text::width(&name) as u16, bar.y, 3, Hit::Close(i)));
         }
-        app.hits.push((x, bar.y, w, Hit::Tab(i)));
         x += w + 1;
     }
     // A passing message (faint), or the connection: the QR and connecting in yellow, closed in red with why.
