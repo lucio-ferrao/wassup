@@ -17,6 +17,9 @@ use whatsapp_rust::waproto::buffa::Message as _;
 use crate::i18n::{s, t};
 use crate::store::{self, Msg, Store};
 
+/// How long a voice message Voxtype failed on waits before it's asked again.
+const VOICE_RETRY: Duration = Duration::from_secs(5 * 60);
+
 /// The connection's state, as the terminals show it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Conn {
@@ -1440,7 +1443,8 @@ impl Wa {
         }
     }
 
-    /// Voice messages read, one at a time (Voxtype takes the GPU): each once, what was heard kept with it.
+    /// Voice messages read, one at a time (Voxtype takes the GPU): each once, what was heard kept with it. One Voxtype
+    /// failed on is asked again a while later, as the GPU may have had no room for the model then.
     async fn voice_loop(self, mut rx: UnboundedReceiver<(String, String)>) {
         while let Some((chat, id)) = rx.recv().await {
             let Some(m) = self.row(&chat, &id) else { continue };
@@ -1450,7 +1454,16 @@ impl Wa {
                     let _ = self.store().set_transcript(&chat, &id, &text);
                     self.emit(ToUi::Messages(chat));
                 }
-                Err(e) => warn!("voice {id}: {e}"),
+                Err(e) => {
+                    warn!("voice {id}: {e}");
+                    if e.is::<crate::voice::Failed>() {
+                        let voices = self.inner.voices.clone();
+                        tokio::spawn(async move {
+                            tokio::time::sleep(VOICE_RETRY).await;
+                            let _ = voices.send((chat, id));
+                        });
+                    }
+                }
             }
         }
     }

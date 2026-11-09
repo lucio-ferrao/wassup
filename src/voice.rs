@@ -27,10 +27,22 @@ pub async fn transcribe(audio: &Path) -> Result<String> {
     let _ = std::fs::remove_file(&wav);
     let out = out?;
     if !out.status.success() {
-        return Err(anyhow!("voxtype: {}", String::from_utf8_lossy(&out.stderr).trim()));
+        return Err(Failed(String::from_utf8_lossy(&out.stderr).trim().to_string()).into());
     }
     Ok(heard(&String::from_utf8_lossy(&out.stdout)))
 }
+
+/// Voxtype ran and failed, which may pass: the GPU without room for the model, say. What it said on stderr.
+#[derive(Debug)]
+pub struct Failed(String);
+
+impl std::fmt::Display for Failed {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "voxtype: {}", self.0)
+    }
+}
+
+impl std::error::Error for Failed {}
 
 /// The text in what `voxtype transcribe` prints: "Processing N samples…", a blank line, then what it heard.
 fn heard(stdout: &str) -> String {
