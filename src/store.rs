@@ -307,6 +307,27 @@ impl Store {
         Ok(())
     }
 
+    /// Matrix's names as they are now: each person's (the nickname I gave them, or else their own a rank below, which
+    /// a message of theirs keeps up to date) and the nickname of the other side of each direct chat, which goes
+    /// before the room's name; those I took away gone.
+    pub fn set_matrix_names(&self, people: &[(String, String, i32)], chats: &[(String, String)]) -> Result<()> {
+        self.batch(|db| {
+            // Everyone's own name a rank below, those not in the rooms as kept too (kept before nicknames were).
+            db.execute("UPDATE names SET rank = ?1 WHERE jid LIKE '@%' AND rank > ?1", [NAME_PUSH])?;
+            for (jid, name, rank) in people {
+                db.execute(
+                    "INSERT INTO names (jid, name, rank) VALUES (?1, ?2, ?3) ON CONFLICT (jid) DO UPDATE SET name = ?2, rank = ?3",
+                    params![jid, name, rank],
+                )?;
+            }
+            db.execute("DELETE FROM names WHERE jid LIKE '%@mx'", [])?;
+            for (jid, name) in chats {
+                Self::set_name(db, jid, name, NAME_CONTACT)?;
+            }
+            Ok(())
+        })
+    }
+
     /// Whether a message is kept.
     pub fn has_message(db: &Connection, chat: &str, id: &str) -> bool {
         db.query_row("SELECT 1 FROM messages WHERE chat = ?1 AND id = ?2", params![chat, id], |_| Ok(())).optional().ok().flatten().is_some()
@@ -834,6 +855,34 @@ mod tests {
         assert_eq!(rel("../wassup.db"), None);
         assert_eq!(rel("/etc/passwd"), None);
         assert_eq!(rel("c/A1.jpg").as_deref(), Some("c/A1.jpg"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A Matrix nickname goes before the name the person gave themselves, and names the direct chat with them; taken
+    /// away, their own name is back, and a message of theirs keeps it up to date again, as it does one kept before
+    /// nicknames were.
+    #[test]
+    fn matrix_nicknames() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("target").join(format!("store-nicknames-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("wassup.db");
+        let _ = std::fs::remove_file(&path);
+        let store = Store::open(&path).unwrap();
+        let (rita, chat) = ("@rita:example.org", "!aBcD:example.org@mx");
+        store.batch(|db| Store::set_name(db, rita, "Rita Lemos", NAME_CONTACT)).unwrap();
+        store.set_matrix_names(&[], &[]).unwrap();
+        store.batch(|db| Store::set_name(db, rita, "Rita M. Lemos", NAME_PUSH)).unwrap();
+        assert_eq!(store.name_of(rita), "Rita M. Lemos");
+        store.set_matrix_names(&[(rita.into(), "Ritinha".into(), NAME_CONTACT)], &[(chat.into(), "Ritinha".into())]).unwrap();
+        store.batch(|db| Store::set_name(db, rita, "Rita Lemos", NAME_PUSH)).unwrap();
+        assert_eq!(store.name_of(rita), "Ritinha");
+        assert_eq!(store.name_of(chat), "Ritinha");
+        store.set_matrix_names(&[(rita.into(), "Rita Lemos".into(), NAME_PUSH)], &[]).unwrap();
+        assert_eq!(store.name_of(rita), "Rita Lemos");
+        assert!(!store.has_name(chat));
+        store.batch(|db| Store::set_name(db, rita, "Rita Maria Lemos", NAME_PUSH)).unwrap();
+        assert_eq!(store.name_of(rita), "Rita Maria Lemos");
+        drop(store);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

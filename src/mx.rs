@@ -31,7 +31,10 @@ use matrix_sdk::attachment::AttachmentConfig;
 use matrix_sdk::media::{MediaFormat, MediaRequestParameters};
 use matrix_sdk::ruma::events::room::MediaSource;
 use matrix_sdk::ruma::events::room::message::TextMessageEventContent;
+use matrix_sdk::ruma::events::GlobalAccountDataEvent;
+use matrix_sdk::ruma::events::macros::EventContent;
 use matrix_sdk::{Client, Room, RoomMemberships};
+use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::i18n::{s, t};
@@ -40,6 +43,11 @@ use crate::wa::ToUi;
 
 const DIRECT: &str = "@mx";
 const GROUP: &str = "@mxg";
+
+/// The nicknames I gave people, by their id, as my Matrix client keeps them in the account.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, EventContent)]
+#[ruma_event(type = "org.ferrao.matrix.nicknames", kind = GlobalAccountData)]
+struct NicknamesEventContent(std::collections::BTreeMap<String, String>);
 
 /// Whether a chat is a Matrix room.
 pub fn is_matrix(chat: &str) -> bool {
@@ -193,6 +201,11 @@ impl Mx {
             let mx = on.clone();
             async move { mx.on_receipt(&room, &ev.content).await }
         });
+        let on = mx.clone();
+        client.add_event_handler(move |ev: GlobalAccountDataEvent<NicknamesEventContent>| {
+            let mx = on.clone();
+            async move { mx.nicknames(ev.content).await }
+        });
         tokio::spawn(mx.clone().catch_up());
         tokio::spawn(async move {
             loop {
@@ -217,6 +230,9 @@ impl Mx {
     /// The rooms this store has no message of yet, their latest messages: the sync only brings what's new since the
     /// last one, and the first was `wa matrix login`'s.
     async fn catch_up(self) {
+        // The nicknames as the last sync left them: the sync only says when they change.
+        let kept = self.inner.client.account().account_data::<NicknamesEventContent>().await;
+        self.nicknames(kept.ok().flatten().and_then(|raw| raw.deserialize().ok()).unwrap_or_default()).await;
         for room in self.inner.client.joined_rooms() {
             let chat = chat_of(room.room_id(), room.is_direct().await.unwrap_or(false));
             if self.inner.store.count(&chat) != 0 {
@@ -236,6 +252,28 @@ impl Mx {
             if is_matrix(&chat) {
                 self.ensure_media(&chat, &id);
             }
+        }
+        self.emit(ToUi::Chats);
+    }
+
+    /// The nicknames I gave people, as names surer than their own, and as the names of the direct chats with them.
+    async fn nicknames(&self, nicks: NicknamesEventContent) {
+        let nicks = nicks.0;
+        let mut people: Vec<(String, String, i32)> = nicks.iter().map(|(id, n)| (id.clone(), n.clone(), store::NAME_CONTACT)).collect();
+        let mut chats = vec![];
+        for room in self.inner.client.joined_rooms() {
+            if let Ok(members) = room.members_no_sync(RoomMemberships::JOIN).await {
+                for m in members.iter().filter(|m| m.user_id() != self.inner.me && !nicks.contains_key(m.user_id().as_str())) {
+                    people.push((m.user_id().to_string(), m.name().to_string(), store::NAME_PUSH));
+                }
+            }
+            if room.is_direct().await.unwrap_or(false)
+                && let Some(n) = room.direct_targets().iter().filter_map(|t| t.as_user_id()).find_map(|u| nicks.get(u.as_str())) {
+                    chats.push((chat_of(room.room_id(), true), n.clone()));
+                }
+        }
+        if let Err(e) = self.inner.store.set_matrix_names(&people, &chats) {
+            warn!("matrix nicknames: {e}");
         }
         self.emit(ToUi::Chats);
     }
@@ -322,8 +360,9 @@ impl Mx {
             if !name.is_empty() {
                 Store::set_chat_name(db, &chat, &name)?;
             }
+            // Their own name, below a nickname I gave them (nicknames).
             if !from_me {
-                Store::set_name(db, &sender, &sender_name, store::NAME_CONTACT)?;
+                Store::set_name(db, &sender, &sender_name, store::NAME_PUSH)?;
             }
             if let Some(Relation::Replacement(r)) = &ev.content.relates_to {
                 let new = shown(&r.new_content.msgtype);
