@@ -403,7 +403,7 @@ function start() {
       if (p.emoji) { if (box.textContent !== p.emoji) box.textContent = p.emoji; return }
       const img = box.firstChild, src = sources.get(p.id) ?? '', full = (p.h * ch) / Math.max(0.01, p.to - p.from)
       if (img.getAttribute('src') !== src) img.src = src
-      Object.assign(img.style, { width: `${p.w * cw}px`, height: `${full}px`, top: `${-p.from * full}px` })
+      Object.assign(img.style, { width: `${p.w * cw}px`, height: `${full}px`, top: `${-p.from * full}px`, objectFit: p.fill ? 'cover' : '' })
     })
     while (layer.children.length > list.length) layer.lastChild.remove()
   }

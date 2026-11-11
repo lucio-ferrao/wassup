@@ -1041,7 +1041,15 @@ pub fn draw_whole(f: &mut Frame, app: &mut App, key: &str, img: &Arc<DynamicImag
     }
     if app.web.is_some() || app.kitty.is_some() {
         let file = key.strip_prefix("avatar:").and_then(|j| app.store.avatar(j));
-        app.web_pics.push(crate::app::WebPic::Image { key: key.to_string(), file, png: Some(img.clone()), x: rect.x, y: rect.y, w: rect.width, h: rect.height, from: 0.0, to: 1.0 });
+        // The page cuts it itself (webtab.rs); kitty draws it whole over the cells, so it goes already cut.
+        let png = if app.web.is_some() {
+            img.clone()
+        } else {
+            let k = (format!("fill:{key}"), rect.width, rect.height);
+            let (pw, ph) = (rect.width as u32 * cell.width as u32, rect.height as u32 * cell.height as u32);
+            app.scaled.entry(k).or_insert_with(|| Arc::new(img.resize_to_fill(pw.max(1), ph.max(1), image::imageops::FilterType::Triangle))).clone()
+        };
+        app.web_pics.push(crate::app::WebPic::Image { key: key.to_string(), file, png: Some(png), x: rect.x, y: rect.y, w: rect.width, h: rect.height, from: 0.0, to: 1.0 });
         return;
     }
     let crop_key = (key.to_string(), rect.width, rect.height, 0, rect.height);

@@ -691,7 +691,12 @@ impl Screen {
                     };
                     // The rows in view: `h` is the whole picture's.
                     let rows = ((to - from) * *h as f32).round().max(1.0) as u16;
-                    shown.push(json!({ "id": id, "x": x, "y": row.unwrap_or(*y as usize), "w": w, "h": rows, "from": from, "to": to }));
+                    let mut pic = json!({ "id": id, "x": x, "y": row.unwrap_or(*y as usize), "w": w, "h": rows, "from": from, "to": to });
+                    // A chat's photo fills its cells, cut to their shape rather than stretched.
+                    if key.starts_with("avatar:") {
+                        pic["fill"] = json!(true);
+                    }
+                    shown.push(pic);
                 }
                 WebPic::Emoji { emoji, x, y } => shown.push(json!({ "emoji": emoji, "x": x, "y": row.unwrap_or(*y as usize) })),
             }
