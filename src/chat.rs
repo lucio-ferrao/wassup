@@ -351,7 +351,7 @@ pub fn layout(app: &mut App, width: u16, cell: Size) -> Vec<Row> {
             let author = if !group || who == app.me || who.is_empty() { String::new() } else { format!("{}: ", app.store.name_of(who)) };
             let (said, _) = text::with_mentions(said, |d| app.store.mention_name(d));
             let said = crate::unicode::tame(&crate::links::show_links(&said)).into_owned();
-            parts.push(Part::In(Piece::plain(text::truncate(&format!("│ {author}{said}"), width_us.saturating_sub(6)), Style::new().fg(theme().dim))));
+            parts.push(Part::In(Piece::plain(text::truncate(&format!("│ {author}{said}"), width_us.saturating_sub(6).min(wrap_at)), Style::new().fg(theme().dim))));
         }
         // Pictures, out of the bubble; what came before them closes a bubble of its own above.
         if has_picture(m) {
@@ -612,8 +612,13 @@ fn bubble_row(p: Piece, inner: usize, msg: usize, mine: bool, bare: bool, indent
     let pad = if bare { 0 } else { 1 };
     let w = p.width();
     let caret = p.caret;
-    // Where the bubble starts and where this row's text does.
-    let (start, content) = if mine { (text_w.saturating_sub(inner + pad), text_w.saturating_sub(w)) } else { (indent.saturating_sub(pad), indent) };
+    // Where the bubble starts and where this row's text does: against its left side, mine too; emoji alone, with no
+    // bubble, against the edge, as the last row's (with the time) is.
+    let (start, content) = match (mine, bare) {
+        (true, false) => (text_w.saturating_sub(inner + pad), text_w.saturating_sub(inner)),
+        (true, true) => (text_w.saturating_sub(inner + pad), text_w.saturating_sub(w)),
+        (false, _) => (indent.saturating_sub(pad), indent),
+    };
     let bgs = |s: Style| if paint && !bare { s.bg(bg) } else { s };
     let mut spans = vec![Span::raw(" ".repeat(start))];
     if content > start {
