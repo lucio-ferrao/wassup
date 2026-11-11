@@ -396,6 +396,45 @@ impl Mx {
         });
     }
 
+    /// A room's photo, kept as a WhatsApp chat's: the room's own, or else, in a direct chat, the other person's.
+    pub fn ensure_profile(&self, chat: &str) {
+        let key = format!("profile:{chat}");
+        let Some(room) = self.room(chat) else { return };
+        if !self.inner.downloading.lock().unwrap().insert(key.clone()) {
+            return;
+        }
+        let (mx, chat) = (self.clone(), chat.to_string());
+        tokio::spawn(async move {
+            let mut p = store::Profile { fetched: chrono::Utc::now().timestamp(), ..Default::default() };
+            let mut bytes = room.avatar(MediaFormat::File).await;
+            if matches!(bytes, Ok(None)) && !is_group(&chat)
+                && let Ok(members) = room.members(RoomMemberships::JOIN).await
+                && let Some(other) = members.iter().find(|m| m.user_id() != mx.inner.me) {
+                    bytes = other.avatar(MediaFormat::File).await;
+                }
+            match bytes {
+                Ok(Some(b)) => {
+                    let dir = crate::wa::media_dir(&mx.inner.media, &chat);
+                    let path = dir.join("profile.jpg");
+                    match std::fs::create_dir_all(&dir).and_then(|()| std::fs::write(&path, b)) {
+                        Ok(()) => p.avatar = Some(path.to_string_lossy().into_owned()),
+                        Err(e) => warn!("matrix photo {chat}: {e}"),
+                    }
+                }
+                Ok(None) => {}
+                // The photo kept so far stays, asked again the next time.
+                Err(e) => {
+                    warn!("matrix photo {chat}: {e}");
+                    mx.inner.downloading.lock().unwrap().remove(&key);
+                    return;
+                }
+            }
+            let _ = mx.inner.store.set_profile(&chat, &p);
+            mx.inner.downloading.lock().unwrap().remove(&key);
+            mx.emit(ToUi::Profile(chat));
+        });
+    }
+
     /// A reaction to a message: one per person and message, as the store keeps them (the latest wins). Which
     /// message and whose it was is kept by the reaction's id, for when it's taken away.
     async fn on_reaction(&self, room: &Room, ev: &OriginalSyncReactionEvent, history: bool) {

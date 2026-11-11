@@ -1930,10 +1930,13 @@ impl Backend for Wa {
     }
 
     fn ensure_profile(&self, jid: &str) {
-        if crate::mx::is_matrix_id(jid) {
+        if self.store().profile(jid).is_some_and(|p| chrono::Utc::now().timestamp() - p.fetched < 86400) {
             return;
         }
-        if self.store().profile(jid).is_some_and(|p| chrono::Utc::now().timestamp() - p.fetched < 86400) {
+        if crate::mx::is_matrix_id(jid) {
+            if let Some(mx) = self.inner.mx.get() {
+                mx.ensure_profile(jid);
+            }
             return;
         }
         if self.inner.live.lock().unwrap().profile_asked.insert(jid.to_string()) {
