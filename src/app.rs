@@ -355,8 +355,9 @@ pub struct App {
     pub unread_shown: u32,
     pub clear_screen: bool,
     /// When to ask the terminal again what it can do, and whether to start its pictures afresh even if it says the
-    /// same: half a second after it last changed size (another terminal taking up the Herdr pane, mostly), or at once
-    /// with Ctrl+L.
+    /// same: half a second after it last changed size, always afresh, or at once with Ctrl+L. A change of size may be
+    /// another terminal of the same kind taking over (a zmx session attached again, which signals it even at the
+    /// same size), and that one holds none of the pictures sent.
     pub reprobe_at: Option<(Instant, bool)>,
     pub bell: bool,
     pub clipboard: Option<String>,
@@ -2127,8 +2128,7 @@ impl App {
                 self.rows_dirty = true;
                 self.list_dirty = true;
                 if self.web.is_none() {
-                    let force = self.reprobe_at.is_some_and(|(_, f)| f);
-                    self.reprobe_at = Some((Instant::now() + Duration::from_millis(500), force));
+                    self.reprobe_at = Some((Instant::now() + Duration::from_millis(500), true));
                 }
             }
             _ => {}
