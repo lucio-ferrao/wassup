@@ -17,8 +17,10 @@ use whatsapp_rust::waproto::buffa::Message as _;
 use crate::i18n::{s, t};
 use crate::store::{self, Msg, Store};
 
-/// How long a voice message Voxtype failed on waits before it's asked again.
+/// How long a voice message Voxtype failed on waits before it's asked again, the first time: twice as long after each
+/// failure, up to a day.
 const VOICE_RETRY: Duration = Duration::from_secs(5 * 60);
+const VOICE_RETRY_MAX: Duration = Duration::from_secs(24 * 3600);
 
 /// The connection's state, as the terminals show it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1444,22 +1446,28 @@ impl Wa {
     }
 
     /// Voice messages read, one at a time (Voxtype takes the GPU): each once, what was heard kept with it. One Voxtype
-    /// failed on is asked again a while later, as the GPU may have had no room for the model then.
+    /// failed on is asked again a while later, as the GPU may have had no room for the model then, and later each time.
     async fn voice_loop(self, mut rx: UnboundedReceiver<(String, String)>) {
+        // The failures of each, for how long the next try waits.
+        let mut failures: HashMap<(String, String), u32> = HashMap::new();
         while let Some((chat, id)) = rx.recv().await {
             let Some(m) = self.row(&chat, &id) else { continue };
             let Some(path) = m.media_path.filter(|_| m.kind == "voice" && m.transcript.is_none()) else { continue };
             match crate::voice::transcribe(Path::new(&path)).await {
                 Ok(text) => {
+                    failures.remove(&(chat.clone(), id.clone()));
                     let _ = self.store().set_transcript(&chat, &id, &text);
                     self.emit(ToUi::Messages(chat));
                 }
                 Err(e) => {
                     warn!("voice {id}: {e}");
                     if e.is::<crate::voice::Failed>() {
+                        let n = failures.entry((chat.clone(), id.clone())).or_default();
+                        let wait = VOICE_RETRY.saturating_mul(1 << (*n).min(16)).min(VOICE_RETRY_MAX);
+                        *n += 1;
                         let voices = self.inner.voices.clone();
                         tokio::spawn(async move {
-                            tokio::time::sleep(VOICE_RETRY).await;
+                            tokio::time::sleep(wait).await;
                             let _ = voices.send((chat, id));
                         });
                     }
