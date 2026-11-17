@@ -197,6 +197,8 @@ fn draw_band(f: &mut Frame, app: &mut App, area: Rect) -> u16 {
         })
     } else if let Some((_, everyone)) = &app.deleting {
         Some(s(if *everyone { "deleteForAll" } else { "deleteForMe" }))
+    } else if let Some((_, pw, ph)) = app.pasted.as_ref().filter(|_| !app.picker_open) {
+        Some(format!("📎 {} {pw}×{ph}", s("image")))
     } else if let Some(m) = target.as_deref().and_then(|id| app.msg(id)).cloned() {
         let said = m.text.lines().next().filter(|l| !l.is_empty()).map(String::from).unwrap_or_else(|| format!("[{}]", m.kind));
         let said = crate::app::bare_text(&said).to_string();

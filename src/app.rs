@@ -236,6 +236,8 @@ pub struct App {
     pub editing: Option<String>,
     /// The message of mine being edited in its bubble, with ←; Enter saves it, Esc gives it up.
     pub inline_edit: Option<InlineEdit>,
+    /// A picture pasted into the band (its copy here, and its size), sent with what's written as its caption.
+    pub pasted: Option<(std::path::PathBuf, u32, u32)>,
     pub deleting: Option<(String, bool)>,
     pub search: Option<Search>,
     pub keep_selected_in_view: bool,
@@ -430,6 +432,7 @@ impl App {
             react_to: None,
             editing: None,
             inline_edit: None,
+            pasted: None,
             deleting: None,
             search: None,
             keep_selected_in_view: false,
@@ -736,6 +739,7 @@ impl App {
             self.selected = None;
             self.reply_to = None;
             self.react_to = None;
+            self.pasted = None;
             self.quick_for = None;
             // A correction isn't a draft: it goes. The rest stays saved in the chat left.
             if self.editing.take().is_some() {
@@ -1229,6 +1233,10 @@ impl App {
         if self.focus != Focus::Input || text.is_empty() {
             return;
         }
+        // The path of a picture alone (Termarchy pastes one it uploaded, a file manager one copied) is the picture.
+        if let Some(path) = picture_path(text) {
+            return self.take_picture(&std::fs::read(&path).unwrap_or_default(), &path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase());
+        }
         self.input = format!("{}{text}{}", compose::before(&self.input, self.cursor), compose::after(&self.input, self.cursor));
         self.cursor += compose::len(text);
         self.accepted = None;
@@ -1236,6 +1244,25 @@ impl App {
         self.note_composing();
         self.note_writing();
         self.update_suggestions(150);
+    }
+
+    /// A picture pasted: copied here, as what's pasted may go (Termarchy's uploads are cleared, the clipboard
+    /// changes), to wait in the band for Enter; those of more than a day ago go then. Nothing when it isn't one.
+    fn take_picture(&mut self, data: &[u8], ext: &str) {
+        let Ok((w, h)) = image::ImageReader::new(std::io::Cursor::new(data)).with_guessed_format().map_err(image::ImageError::from).and_then(|r| r.into_dimensions()) else { return };
+        let dir = crate::config_dir().join("pasted");
+        let day = std::time::SystemTime::now() - Duration::from_secs(86400);
+        for e in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+            if e.metadata().and_then(|m| m.modified()).is_ok_and(|t| t < day) {
+                let _ = std::fs::remove_file(e.path());
+            }
+        }
+        let name = format!("{}.{ext}", chrono::Local::now().format("%Y%m%d-%H%M%S%3f"));
+        let path = dir.join(name);
+        if let Err(e) = std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(&path, data)) {
+            return self.flash(format!("{}: {e}", s("error")), 10);
+        }
+        self.pasted = Some((path, w, h));
     }
 
     /// Who can be mentioned in a group: those who wrote in it, most recent first, with a known name; each by its
@@ -1667,6 +1694,17 @@ impl App {
                 self.backend.edit(&jid, &id, &text);
             }
             return;
+        }
+        if let Some((path, ..)) = self.pasted.clone() {
+            let Some(jid) = self.current().map(String::from) else { return self.flash(s("openFirst"), 6) };
+            if !self.is_open() {
+                return self.flash(s("noConnection"), 6);
+            }
+            self.pasted = None;
+            self.reply_to = None;
+            self.at_bottom = true;
+            self.anchor = None;
+            return self.backend.send_file(&jid, &path.to_string_lossy(), &text);
         }
         if text.is_empty() {
             return;
@@ -2260,6 +2298,9 @@ impl App {
             self.suggestions.clear();
             return;
         }
+        if self.pasted.take().is_some() {
+            return;
+        }
         if self.reply_to.is_some() || self.react_to.is_some() {
             self.reply_to = None;
             self.react_to = None;
@@ -2332,6 +2373,14 @@ impl App {
         // Shift+Enter (with Kitty's keyboard protocol) or Ctrl+J: a new line.
         if (k.code == KeyCode::Enter && shift) || (ctrl && k.code == KeyCode::Char('j')) {
             return self.paste("\n");
+        }
+        // Ctrl+V: a picture on the desktop's clipboard, which the terminal doesn't paste; not from a browser's tab,
+        // whose desktop isn't this one's.
+        if ctrl && k.code == KeyCode::Char('v') {
+            if let Some((data, ext)) = self.web.is_none().then(clipboard_picture).flatten() {
+                self.take_picture(&data, ext);
+            }
+            return;
         }
         if !self.suggestions.is_empty() {
             if matches!(k.code, KeyCode::Up | KeyCode::Down) && self.suggestions.len() > 1 {
@@ -3185,6 +3234,83 @@ pub fn inside(r: Rect, x: u16, y: u16) -> bool {
 }
 
 /// The editing key a key event is, if any.
+/// The picture a pasted text names, when it's only a path (as is, quoted, with its spaces escaped, or as a file://
+/// link) to one that's here, of a kind WhatsApp sends as a picture.
+fn picture_path(text: &str) -> Option<std::path::PathBuf> {
+    let t = text.trim();
+    if t.contains('\n') {
+        return None;
+    }
+    let t = t.strip_prefix('\'').and_then(|t| t.strip_suffix('\'')).or_else(|| t.strip_prefix('"').and_then(|t| t.strip_suffix('"'))).unwrap_or(t);
+    let t = match t.strip_prefix("file://") {
+        Some(link) => percent_decoded(link)?,
+        None => t.replace("\\ ", " "),
+    };
+    let path = match t.strip_prefix("~/") {
+        Some(rest) => crate::home().join(rest),
+        None => std::path::PathBuf::from(&t),
+    };
+    let ext = path.extension()?.to_str()?.to_lowercase();
+    (path.is_absolute() && matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "webp") && path.is_file()).then_some(path)
+}
+
+fn percent_decoded(s: &str) -> Option<String> {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' {
+            out.push(u8::from_str_radix(s.get(i + 1..i + 3)?, 16).ok()?);
+            i += 3;
+        } else {
+            out.push(b[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
+/// The picture on the desktop's clipboard, and its extension: wl-paste's under Wayland, xclip's under X. A
+/// clipboard whose owner doesn't answer is given up after two seconds.
+fn clipboard_picture() -> Option<(Vec<u8>, &'static str)> {
+    let wayland = std::env::var_os("WAYLAND_DISPLAY").is_some();
+    if !wayland && std::env::var_os("DISPLAY").is_none() {
+        return None;
+    }
+    let run = |args: &[&str]| -> Option<Vec<u8>> {
+        let (cmd, args): (&str, Vec<&str>) = if wayland { ("wl-paste", args.to_vec()) } else { ("xclip", [&["-selection", "clipboard", "-o"][..], args].concat()) };
+        let mut child = std::process::Command::new(cmd)
+            .args(args)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .ok()?;
+        let mut stdout = child.stdout.take()?;
+        let reader = std::thread::spawn(move || {
+            let mut out = Vec::new();
+            std::io::Read::read_to_end(&mut stdout, &mut out).map(|_| out)
+        });
+        let end = Instant::now() + Duration::from_secs(2);
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) => return status.success().then(|| reader.join().ok()?.ok()).flatten(),
+                Ok(None) if Instant::now() < end => std::thread::sleep(Duration::from_millis(10)),
+                _ => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return None;
+                }
+            }
+        }
+    };
+    let types = String::from_utf8(run(if wayland { &["--list-types"] } else { &["-t", "TARGETS"] })?).ok()?;
+    let (mime, ext) = [("image/png", "png"), ("image/jpeg", "jpg"), ("image/webp", "webp")].into_iter().find(|(m, _)| types.lines().any(|l| l.trim() == *m))?;
+    let args = if wayland { vec!["--no-newline", "--type", mime] } else { vec!["-t", mime] };
+    let data = run(&args)?;
+    (!data.is_empty()).then_some((data, ext))
+}
+
 fn edit_key(k: &KeyEvent) -> Option<Edit> {
     let ctrl = k.modifiers.contains(KeyModifiers::CONTROL) || k.modifiers.contains(KeyModifiers::ALT);
     Some(match k.code {
@@ -3243,4 +3369,26 @@ async fn event_loop<B: ratatui::backend::Backend>(app: &mut App, terminal: &mut 
         crate::ui::frame(app, terminal)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn picture_path_as_pasted() {
+        let dir = std::env::temp_dir().join(format!("wassup-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("uma foto.png");
+        std::fs::write(&file, b"x").unwrap();
+        let p = file.to_string_lossy().into_owned();
+        assert_eq!(picture_path(&p), Some(file.clone()));
+        assert_eq!(picture_path(&format!("'{p}'\n")), Some(file.clone()));
+        assert_eq!(picture_path(&p.replace(' ', "\\ ")), Some(file.clone()));
+        assert_eq!(picture_path(&format!("file://{}", p.replace(' ', "%20"))), Some(file.clone()));
+        assert_eq!(picture_path(&format!("{p}\n{p}")), None);
+        assert_eq!(picture_path(&format!("olha {p}")), None);
+        assert_eq!(picture_path(&p.replace(".png", ".txt")), None);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }
